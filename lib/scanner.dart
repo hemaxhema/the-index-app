@@ -14,6 +14,8 @@ import 'pdf_repair.dart';
 Future<LibraryIndex> scanFolder(
   String folder, {
   List<String> folderOrder = const [],
+  Set<String> disabledFolders = const {},
+  bool? dictionaryModeOverride,
 }) async {
   final raw = await Isolate.run(() => _scan(folder));
 
@@ -40,6 +42,8 @@ Future<LibraryIndex> scanFolder(
     books: books,
     occurrences: occurrences,
     folderOrder: folderOrder,
+    disabledFolders: disabledFolders,
+    dictionaryModeOverride: dictionaryModeOverride,
   );
 }
 

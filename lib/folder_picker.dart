@@ -250,7 +250,6 @@ class _FolderPickerDialogState extends State<_FolderPickerDialog> {
               isDense: true,
               hintText: r'الصق مسارًا هنا، مثال: C:\Books',
               prefixIcon: const Icon(Icons.folder_open, size: 20),
-              border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
             ),
             onSubmitted: (v) => _navigate(v.trim()),
           ),
@@ -280,7 +279,11 @@ class _FolderPickerDialogState extends State<_FolderPickerDialog> {
               children: [
                 Icon(
                   e.isUp ? Icons.subdirectory_arrow_left : Icons.folder,
-                  color: e.isUp ? cs.onSurfaceVariant : Colors.amber.shade700,
+                  color: e.isUp
+                      ? cs.onSurfaceVariant
+                      : (Theme.of(context).brightness == Brightness.dark
+                          ? Colors.amber.shade400
+                          : Colors.amber.shade700),
                   size: 22,
                 ),
                 const SizedBox(width: 12),

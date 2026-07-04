@@ -161,16 +161,32 @@ class LibraryIndex {
   final List<Book> books;
   final List<Topic> topics;
 
+  // All scanned occurrences, unfiltered by [disabledFolders] — kept
+  // separately from [topics] (which already excludes disabled folders) so a
+  // folder can be re-enabled later without a rescan.
+  final List<Occurrence> occurrences;
+
   // User-chosen folder display order for this library (folder display
   // names, in order). Empty = alphabetical. Persisted with this index's
   // cache file, so each library keeps its own order (see lib/main.dart's
   // folder-order dialog and Store.saveCache/loadCache).
   final List<String> folderOrder;
 
-  // True when [folder]'s name marks it as an Arabic-dictionary folder (see
-  // dictionary_mode.dart), enabling root-letter bookmark grouping and the
-  // "original word" chip label in the UI.
-  bool get dictionaryMode => isDictionaryFolder(folder);
+  // Folders toggled off by the user (lowercased names): their books'
+  // bookmarks are excluded from [topics] entirely, as if that source didn't
+  // exist. Persisted alongside [folderOrder]; see lib/main.dart's
+  // folder-order dialog.
+  final Set<String> disabledFolders;
+
+  // Manual on/off override for dictionary mode, set via the toggle button in
+  // lib/main.dart. Null = auto-detect from [folder]'s name (see
+  // dictionary_mode.dart); persisted with this index's cache file.
+  final bool? dictionaryModeOverride;
+
+  // True when dictionary mode is active: root-letter bookmark grouping and
+  // the "original word" chip label in the UI. [dictionaryModeOverride] wins
+  // when set; otherwise falls back to name-based auto-detection.
+  bool get dictionaryMode => dictionaryModeOverride ?? isDictionaryFolder(folder);
 
   // O(1) id -> book lookup. [bookById] is called for every chip of every
   // visible row on every rebuild, so a linear scan over [books] was a real
@@ -187,25 +203,39 @@ class LibraryIndex {
     required this.builtAt,
     required this.books,
     required this.topics,
+    this.occurrences = const [],
     this.folderOrder = const [],
+    this.disabledFolders = const {},
+    this.dictionaryModeOverride,
   });
 
   Book? bookById(String id) => _bookById[id];
 
   /// Build topics by grouping raw bookmarks on their normalized key.
+  ///
+  /// Occurrences from a folder in [disabledFolders] (lowercased names) are
+  /// excluded from [topics] as if that source didn't exist, but [occurrences]
+  /// on the returned index still holds the full unfiltered list so the
+  /// folder's bookmarks can come back without a rescan if re-enabled.
   static LibraryIndex build({
     required String folder,
     required List<Book> books,
     required List<Occurrence> occurrences,
     List<String> folderOrder = const [],
+    Set<String> disabledFolders = const {},
+    bool? dictionaryModeOverride,
   }) {
     final folderRank = {
       for (var i = 0; i < folderOrder.length; i++) folderOrder[i].toLowerCase(): i,
     };
-    final dictionaryMode = isDictionaryFolder(folder);
+    final dictionaryMode = dictionaryModeOverride ?? isDictionaryFolder(folder);
     final groups = <String, List<Occurrence>>{};
     final display = <String, String>{};
     for (final o in occurrences) {
+      if (disabledFolders.isNotEmpty) {
+        final folderName = p.basename(p.dirname(o.bookId)).toLowerCase();
+        if (disabledFolders.contains(folderName)) continue;
+      }
       // In dictionary-mode folders, group by root-letter form so spelling
       // variants of the same root (عض / عضض / عضعض) land in one topic; the
       // topic's display title becomes that canonical root.
@@ -246,7 +276,10 @@ class LibraryIndex {
       builtAt: DateTime.now(),
       books: books,
       topics: topics,
+      occurrences: occurrences,
       folderOrder: folderOrder,
+      disabledFolders: disabledFolders,
+      dictionaryModeOverride: dictionaryModeOverride,
     );
   }
 
@@ -254,13 +287,13 @@ class LibraryIndex {
         'folder': folder,
         'builtAt': builtAt.toIso8601String(),
         'books': books.map((b) => b.toJson()).toList(),
-        // Store flat occurrences; topics are rebuilt on load so grouping logic
-        // stays in one place and stays consistent if normalization changes.
-        'occurrences': [
-          for (final t in topics)
-            for (final o in t.occurrences) o.toJson(),
-        ],
+        // Store the full unfiltered occurrences (not just topics') so a
+        // disabled folder's bookmarks survive a save/reload and can come
+        // back if re-enabled.
+        'occurrences': occurrences.map((o) => o.toJson()).toList(),
         'folderOrder': folderOrder,
+        'disabledFolders': disabledFolders.toList(),
+        'dictionaryModeOverride': dictionaryModeOverride,
       };
 
   factory LibraryIndex.fromJson(Map<String, dynamic> j) {
@@ -274,18 +307,28 @@ class LibraryIndex {
             ?.map((e) => e as String)
             .toList() ??
         const [];
+    final disabledFolders = (j['disabledFolders'] as List?)
+            ?.map((e) => e as String)
+            .toSet() ??
+        const <String>{};
+    final dictionaryModeOverride = j['dictionaryModeOverride'] as bool?;
     final idx = LibraryIndex.build(
       folder: j['folder'] as String,
       books: books,
       occurrences: occ,
       folderOrder: folderOrder,
+      disabledFolders: disabledFolders,
+      dictionaryModeOverride: dictionaryModeOverride,
     );
     return LibraryIndex(
       folder: idx.folder,
       builtAt: DateTime.tryParse(j['builtAt'] as String? ?? '') ?? DateTime.now(),
       books: idx.books,
       topics: idx.topics,
+      occurrences: idx.occurrences,
       folderOrder: idx.folderOrder,
+      disabledFolders: idx.disabledFolders,
+      dictionaryModeOverride: idx.dictionaryModeOverride,
     );
   }
 
@@ -303,15 +346,27 @@ class LibraryIndex {
     return names;
   }
 
-  /// Rebuilds topics with a new folder order, from the already-loaded books
-  /// and occurrences — no rescan/disk work needed.
-  LibraryIndex reordered(List<String> newOrder) => LibraryIndex.build(
+  /// Rebuilds topics with a new folder order and/or enabled-folder set, from
+  /// the already-loaded books and occurrences — no rescan/disk work needed.
+  LibraryIndex reordered(List<String> newOrder, {Set<String>? disabledFolders}) =>
+      LibraryIndex.build(
         folder: folder,
         books: books,
-        occurrences: [
-          for (final t in topics) for (final o in t.occurrences) o,
-        ],
+        occurrences: occurrences,
         folderOrder: newOrder,
+        disabledFolders: disabledFolders ?? this.disabledFolders,
+        dictionaryModeOverride: dictionaryModeOverride,
+      );
+
+  /// Rebuilds topics with dictionary mode forced on/off — no rescan/disk
+  /// work needed. See the toggle button in lib/main.dart.
+  LibraryIndex withDictionaryMode(bool enabled) => LibraryIndex.build(
+        folder: folder,
+        books: books,
+        occurrences: occurrences,
+        folderOrder: folderOrder,
+        disabledFolders: disabledFolders,
+        dictionaryModeOverride: enabled,
       );
 }
 

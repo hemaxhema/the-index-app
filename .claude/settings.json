@@ -1,7 +1,9 @@
 {
   "permissions": {
     "allow": [
-      "PowerShell(flutter analyze)"
+      "PowerShell(flutter analyze)",
+      "Read(//c/Users/ibrahim/AppData/Local/Pub/Cache/hosted/pub.dev/win32-6.3.0/lib/src/**)",
+      "Read(//c/Users/ibrahim/AppData/Local/Pub/Cache/hosted/pub.dev/win32-6.3.0/lib/**)"
     ]
   }
 }

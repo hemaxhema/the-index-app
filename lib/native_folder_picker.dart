@@ -1,3 +1,5 @@
+import 'dart:ffi';
+
 import 'package:ffi/ffi.dart';
 import 'package:win32/win32.dart';
 
@@ -39,6 +41,56 @@ String? nativePickFolder() {
       item.release();
     }
   } finally {
+    dialog?.release();
+    if (needUninit) CoUninitialize();
+  }
+}
+
+/// Shows the native Windows file picker restricted to `.exe` files, for
+/// choosing a PDF viewer executable.
+///
+/// Returns the selected file path, or null if the user cancelled. Throws on
+/// unexpected COM failure so the caller can fall back to manual path entry.
+String? nativePickExecutable() {
+  final initHr = CoInitializeEx(
+    COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE,
+  );
+  final needUninit = initHr == S_OK || initHr == S_FALSE;
+
+  IFileOpenDialog? dialog;
+  Pointer<COMDLG_FILTERSPEC>? spec;
+  PWSTR? namePwstr;
+  PWSTR? specPwstr;
+  try {
+    dialog = createInstance<IFileOpenDialog>(FileOpenDialog);
+    namePwstr = 'برامج تنفيذية (*.exe)'.toPwstr();
+    specPwstr = '*.exe'.toPwstr();
+    spec = calloc<COMDLG_FILTERSPEC>();
+    spec.ref.pszName = namePwstr;
+    spec.ref.pszSpec = specPwstr;
+    dialog.setFileTypes(1, spec);
+
+    try {
+      dialog.show(null);
+    } on WindowsException catch (e) {
+      if (e.hr == _cancelled) return null; // user pressed Cancel
+      rethrow;
+    }
+
+    final item = dialog.getResult();
+    if (item == null) return null;
+    try {
+      final name = item.getDisplayName(SIGDN_FILESYSPATH);
+      final path = name.cast<Utf16>().toDartString();
+      CoTaskMemFree(name);
+      return path;
+    } finally {
+      item.release();
+    }
+  } finally {
+    if (spec != null) calloc.free(spec);
+    if (namePwstr != null) calloc.free(namePwstr);
+    if (specPwstr != null) calloc.free(specPwstr);
     dialog?.release();
     if (needUninit) CoUninitialize();
   }

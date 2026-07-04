@@ -10,26 +10,34 @@ import 'scanner.dart';
 import 'store.dart';
 import 'viewer.dart';
 import 'folder_picker.dart';
+import 'theme/app_theme.dart';
+import 'viewer_settings.dart';
 
 void main() => runApp(const BookmarkIndexApp());
+
+/// Global day/night toggle. Day (light) mode is the normal/default mode.
+final ValueNotifier<ThemeMode> appThemeMode = ValueNotifier(ThemeMode.light);
 
 class BookmarkIndexApp extends StatelessWidget {
   const BookmarkIndexApp({super.key});
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'فهرس الفهارس',
-      debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        useMaterial3: true,
-        colorSchemeSeed: const Color(0xFF2D6CDF),
-        brightness: Brightness.light,
-      ),
-      home: const Directionality(
-        textDirection: TextDirection.rtl,
-        child: HomePage(),
-      ),
+    return ValueListenableBuilder<ThemeMode>(
+      valueListenable: appThemeMode,
+      builder: (context, mode, _) {
+        return MaterialApp(
+          title: 'فهرس الفهارس',
+          debugShowCheckedModeBanner: false,
+          theme: AppTheme.day(),
+          darkTheme: AppTheme.night(),
+          themeMode: mode,
+          home: const Directionality(
+            textDirection: TextDirection.rtl,
+            child: HomePage(),
+          ),
+        );
+      },
     );
   }
 }
@@ -139,17 +147,25 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> _scan(String folder) async {
-    // Preserve this folder's custom order across a rescan (refresh button,
-    // post-edit reload) — those always rescan the folder already in _index.
-    // A brand-new folder has no prior order to preserve.
-    final previousOrder =
-        (_index != null && _index!.folder == folder) ? _index!.folderOrder : const <String>[];
+    // Preserve this folder's custom order, disabled sources, and dictionary-
+    // mode override across a rescan (refresh button, post-edit reload) —
+    // those always rescan the folder already in _index. A brand-new folder
+    // has no prior state to preserve.
+    final samefolder = _index != null && _index!.folder == folder;
+    final previousOrder = samefolder ? _index!.folderOrder : const <String>[];
+    final previousDisabled = samefolder ? _index!.disabledFolders : const <String>{};
+    final previousDictOverride = samefolder ? _index!.dictionaryModeOverride : null;
     setState(() {
       _loading = true;
       _status = 'يفحص ملفات PDF…';
     });
     try {
-      final idx = await scanFolder(folder, folderOrder: previousOrder);
+      final idx = await scanFolder(
+        folder,
+        folderOrder: previousOrder,
+        disabledFolders: previousDisabled,
+        dictionaryModeOverride: previousDictOverride,
+      );
       Store.instance.lastFolder = folder;
       Store.instance.saveCache(idx);
       setState(() {
@@ -184,10 +200,102 @@ class _HomePageState extends State<HomePage> {
     return result;
   }
 
+  /// Central "خيارات" dialog: gathers the actions/toggles that used to sit
+  /// directly in the app bar (rescan, folder order, dictionary mode,
+  /// auto-refresh, editing, PDF viewer settings, help) into one place.
+  Future<void> _showOptionsDialog() async {
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          title: const Text('خيارات'),
+          content: SizedBox(
+            width: 420,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  ListTile(
+                    leading: const Icon(Icons.refresh),
+                    title: const Text('إعادة الفحص'),
+                    enabled: !_loading && _index != null,
+                    onTap: () {
+                      Navigator.pop(ctx);
+                      _scan(_index!.folder);
+                    },
+                  ),
+                  ListTile(
+                    leading: const Icon(Icons.sort),
+                    title: const Text('ترتيب المجلدات'),
+                    enabled: !_loading && _index != null,
+                    onTap: () {
+                      Navigator.pop(ctx);
+                      _showFolderOrderDialog();
+                    },
+                  ),
+                  SwitchListTile(
+                    secondary: Icon(
+                      (_index?.dictionaryMode ?? false) ? Icons.auto_stories : Icons.auto_stories_outlined,
+                    ),
+                    title: const Text('وضع القاموس (تجميع حسب الجذر)'),
+                    value: _index?.dictionaryMode ?? false,
+                    onChanged: _index == null
+                        ? null
+                        : (_) {
+                            _toggleDictionaryMode();
+                            setDialogState(() {});
+                          },
+                  ),
+                  SwitchListTile(
+                    secondary: Icon(_autoRefreshAfterEdit ? Icons.sync : Icons.sync_disabled),
+                    title: const Text('التحديث التلقائي بعد التعديل/الحذف'),
+                    value: _autoRefreshAfterEdit,
+                    onChanged: (v) {
+                      setState(() => _autoRefreshAfterEdit = v);
+                      setDialogState(() {});
+                    },
+                  ),
+                  SwitchListTile(
+                    secondary: Icon(_editingEnabled ? Icons.edit : Icons.edit_off),
+                    title: const Text('تفعيل التعديل (إعادة تسمية / حذف)'),
+                    value: _editingEnabled,
+                    onChanged: (v) {
+                      setState(() => _editingEnabled = v);
+                      setDialogState(() {});
+                    },
+                  ),
+                  ListTile(
+                    leading: const Icon(Icons.picture_as_pdf_outlined),
+                    title: const Text('إعدادات عارض PDF'),
+                    onTap: () {
+                      Navigator.pop(ctx);
+                      _showViewerSettings();
+                    },
+                  ),
+                  ListTile(
+                    leading: const Icon(Icons.help_outline),
+                    title: const Text('مساعدة واختصارات لوحة المفاتيح (F1)'),
+                    onTap: () {
+                      Navigator.pop(ctx);
+                      _showHelpDialog();
+                    },
+                  ),
+                ],
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('إغلاق')),
+          ],
+        ),
+      ),
+    );
+  }
+
   Future<void> _showFolderOrderDialog() async {
     final order = _orderedFolderNames();
-    final alphabetical = _index!.folderNames;
-    final saved = await showDialog<List<String>>(
+    final disabled = Set<String>.of(_index!.disabledFolders);
+    final saved = await showDialog<(List<String>, Set<String>)>(
       context: context,
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setDialogState) => AlertDialog(
@@ -196,12 +304,35 @@ class _HomePageState extends State<HomePage> {
             width: 420,
             height: 480,
             child: ReorderableListView.builder(
+              buildDefaultDragHandles: false,
               itemCount: order.length,
-              itemBuilder: (c, i) => ListTile(
-                key: ValueKey(order[i]),
-                leading: const Icon(Icons.folder),
-                title: Text(order[i]),
-              ),
+              itemBuilder: (c, i) {
+                final name = order[i];
+                final isOn = !disabled.contains(name.toLowerCase());
+                return ListTile(
+                  key: ValueKey(name),
+                  leading: Checkbox(
+                    value: isOn,
+                    onChanged: (v) => setDialogState(() {
+                      if (v ?? true) {
+                        disabled.remove(name.toLowerCase());
+                      } else {
+                        disabled.add(name.toLowerCase());
+                      }
+                    }),
+                  ),
+                  title: Text(
+                    name,
+                    style: isOn
+                        ? null
+                        : TextStyle(color: Theme.of(ctx).colorScheme.onSurfaceVariant),
+                  ),
+                  trailing: ReorderableDragStartListener(
+                    index: i,
+                    child: const Icon(Icons.drag_indicator),
+                  ),
+                );
+              },
               onReorder: (oldIndex, newIndex) => setDialogState(() {
                 if (newIndex > oldIndex) newIndex -= 1;
                 final item = order.removeAt(oldIndex);
@@ -211,16 +342,20 @@ class _HomePageState extends State<HomePage> {
           ),
           actions: [
             TextButton(
+              onPressed: () => setDialogState(() => disabled.clear()),
+              child: const Text('تحديد الكل'),
+            ),
+            TextButton(
               onPressed: () => setDialogState(() {
-                order
+                disabled
                   ..clear()
-                  ..addAll(alphabetical);
+                  ..addAll(order.map((n) => n.toLowerCase()));
               }),
-              child: const Text('إعادة الضبط'),
+              child: const Text('إلغاء تحديد الكل'),
             ),
             TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('إلغاء')),
             FilledButton(
-              onPressed: () => Navigator.pop(ctx, order),
+              onPressed: () => Navigator.pop(ctx, (order, disabled)),
               child: const Text('حفظ'),
             ),
           ],
@@ -228,8 +363,17 @@ class _HomePageState extends State<HomePage> {
       ),
     );
     if (!mounted || saved == null) return;
-    setState(() => _index = _index!.reordered(saved));
+    final (newOrder, newDisabled) = saved;
+    setState(() => _index = _index!.reordered(newOrder, disabledFolders: newDisabled));
     Store.instance.saveCache(_index!); // persists the order with this folder's cache
+    _applyFilter();
+  }
+
+  void _toggleDictionaryMode() {
+    final idx = _index;
+    if (idx == null) return;
+    setState(() => _index = idx.withDictionaryMode(!idx.dictionaryMode));
+    Store.instance.saveCache(_index!); // persists the override with this folder's cache
     _applyFilter();
   }
 
@@ -467,7 +611,7 @@ class _HomePageState extends State<HomePage> {
   }
 
   /// Global shortcuts (work even while the search box is focused):
-  /// Ctrl+F focuses search; Alt+1..9 opens the selected topic's Nth book;
+  /// Ctrl+F focuses search; Ctrl+1..9 opens the selected topic's Nth book;
   /// Alt+E opens the "all books" dialog for the selected topic; F1 opens the
   /// help dialog.
   /// Uses SingleActivator (via CallbackShortcuts) so Alt combos match reliably
@@ -494,8 +638,8 @@ class _HomePageState extends State<HomePage> {
       const SingleActivator(LogicalKeyboardKey.f1): _showHelpDialog,
     };
     for (var i = 0; i < 9; i++) {
-      bindings[SingleActivator(topRow[i], alt: true)] = () => _openNth(i);
-      bindings[SingleActivator(numpad[i], alt: true)] = () => _openNth(i);
+      bindings[SingleActivator(topRow[i], control: true)] = () => _openNth(i);
+      bindings[SingleActivator(numpad[i], control: true)] = () => _openNth(i);
     }
     return bindings;
   }
@@ -561,48 +705,32 @@ class _HomePageState extends State<HomePage> {
           onKeyEvent: _onRootKey,
           child: Scaffold(
         appBar: AppBar(
-          backgroundColor: cs.primaryContainer,
           title: const Text(
             'فهرس الفهارس',
             style: TextStyle(fontFamily: 'Typokar'),
           ),
           actions: [
+            ValueListenableBuilder<ThemeMode>(
+              valueListenable: appThemeMode,
+              builder: (context, mode, _) {
+                final isNight = mode == ThemeMode.dark;
+                return IconButton(
+                  tooltip: isNight ? 'الوضع النهاري' : 'الوضع الليلي',
+                  icon: Icon(isNight ? Icons.light_mode : Icons.dark_mode),
+                  onPressed: () => appThemeMode.value =
+                      isNight ? ThemeMode.light : ThemeMode.dark,
+                );
+              },
+            ),
             IconButton(
               tooltip: 'اختيار مجلد',
               icon: const Icon(Icons.folder_open),
               onPressed: _loading ? null : _chooseFolder,
             ),
             IconButton(
-              tooltip: 'إعادة الفحص',
-              icon: const Icon(Icons.refresh),
-              onPressed:
-                  (_loading || _index == null) ? null : () => _scan(_index!.folder),
-            ),
-            IconButton(
-              tooltip: 'ترتيب المجلدات',
-              icon: const Icon(Icons.sort),
-              onPressed:
-                  (_loading || _index == null) ? null : _showFolderOrderDialog,
-            ),
-            IconButton(
-              tooltip: _autoRefreshAfterEdit
-                  ? 'تعطيل التحديث التلقائي بعد التعديل/الحذف'
-                  : 'تفعيل التحديث التلقائي بعد التعديل/الحذف',
-              icon: Icon(_autoRefreshAfterEdit ? Icons.sync : Icons.sync_disabled),
-              onPressed: () =>
-                  setState(() => _autoRefreshAfterEdit = !_autoRefreshAfterEdit),
-            ),
-            IconButton(
-              tooltip: _editingEnabled
-                  ? 'تعطيل التعديل'
-                  : 'تفعيل التعديل',
-              icon: Icon(_editingEnabled ? Icons.edit : Icons.edit_off),
-              onPressed: () => setState(() => _editingEnabled = !_editingEnabled),
-            ),
-            IconButton(
-              tooltip: 'مساعدة واختصارات لوحة المفاتيح (F1)',
-              icon: const Icon(Icons.help_outline),
-              onPressed: _showHelpDialog,
+              tooltip: 'خيارات',
+              icon: const Icon(Icons.settings_outlined),
+              onPressed: _showOptionsDialog,
             ),
           ],
         ),
@@ -638,11 +766,6 @@ class _HomePageState extends State<HomePage> {
                   icon: const Icon(Icons.close),
                   onPressed: () => _searchCtrl.clear(),
                 ),
-          filled: true,
-          border: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(12),
-            borderSide: BorderSide.none,
-          ),
         ),
       ),
     );
@@ -1002,6 +1125,14 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
+  /// Opens the PDF viewer settings dialog, then refreshes the status bar so
+  /// the "displayed via" text reflects any change.
+  Future<void> _showViewerSettings() async {
+    await showViewerSettingsDialog(context);
+    if (!mounted) return;
+    setState(() {});
+  }
+
   /// Shows every keyboard shortcut/gesture and a short explanation of how the
   /// program works. Opened from the AppBar help button and F1.
   Future<void> _showHelpDialog() async {
@@ -1034,7 +1165,7 @@ class _HomePageState extends State<HomePage> {
                     const SizedBox(height: 18),
                     _helpSectionTitle('اختصارات عامة (تعمل من أي مكان)', textTheme),
                     _shortcutRow('Ctrl + F', 'تركيز مربع البحث (يحدد النص الحالي)', cs),
-                    _shortcutRow('Alt + 1 … 9', 'فتح الموضوع المحدد في الكتاب رقم N', cs),
+                    _shortcutRow('Ctrl + 1 … 9', 'فتح الموضوع المحدد في الكتاب رقم N', cs),
                     _shortcutRow('Alt + E', 'عرض كل كتب الموضوع المحدد', cs),
                     _shortcutRow('F1', 'فتح نافذة المساعدة هذه', cs),
                     const SizedBox(height: 14),
@@ -1058,6 +1189,7 @@ class _HomePageState extends State<HomePage> {
                     _shortcutRow('ترتيب المجلدات', 'فتح نافذة لتخصيص ترتيب ظهور المجلدات', cs),
                     _shortcutRow('التحديث التلقائي', 'تبديل تحديث القائمة تلقائيًا بعد إعادة التسمية أو الحذف', cs),
                     _shortcutRow('التعديل', 'تبديل السماح بإعادة التسمية والحذف عبر النقر اليمين', cs),
+                    _shortcutRow('عارض PDF', 'اختيار البرنامج المستخدم لفتح ملفات PDF', cs),
                     _shortcutRow('مساعدة', 'فتح نافذة المساعدة هذه', cs),
                   ],
                 ),

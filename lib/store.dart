@@ -42,10 +42,25 @@ class Store {
     _writeSettings(s);
   }
 
-  /// Explicit viewer executable path (optional; auto-detected otherwise).
+  /// Which PDF viewer to use: 'sumatra' or 'foxit'. Null/unrecognized falls
+  /// back to 'sumatra'.
+  String? get viewerKind => _readSettings()['viewerKind'] as String?;
+  set viewerKind(String? v) {
+    final s = _readSettings()..['viewerKind'] = v;
+    _writeSettings(s);
+  }
+
+  /// Explicit SumatraPDF executable path (optional; auto-detected otherwise).
   String? get viewerPath => _readSettings()['viewerPath'] as String?;
   set viewerPath(String? v) {
     final s = _readSettings()..['viewerPath'] = v;
+    _writeSettings(s);
+  }
+
+  /// Explicit Foxit Reader executable path (optional; auto-detected otherwise).
+  String? get foxitPath => _readSettings()['foxitPath'] as String?;
+  set foxitPath(String? v) {
+    final s = _readSettings()..['foxitPath'] = v;
     _writeSettings(s);
   }
 
