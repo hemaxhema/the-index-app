@@ -49,6 +49,8 @@ String normalizeTitle(String input) {
       case 'إ': // إ
       case 'آ': // آ
       case 'ٱ': // ٱ
+      case 'ؤ': // ؤ
+      case 'ئ': // ئ
         buf.write('ا'); // ا
         break;
       case 'ى': // ى (alef maksura)
@@ -56,12 +58,6 @@ String normalizeTitle(String input) {
         break;
       case 'ة': // ة (ta marbuta)
         buf.write('ه'); // ه
-        break;
-      case 'ؤ': // ؤ
-        buf.write('و'); // و
-        break;
-      case 'ئ': // ئ
-        buf.write('ي'); // ي
         break;
       default:
         buf.write(ch);

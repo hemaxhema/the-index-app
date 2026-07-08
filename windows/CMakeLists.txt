@@ -90,6 +90,14 @@ if(PLUGIN_BUNDLED_LIBRARIES)
     COMPONENT Runtime)
 endif()
 
+# Bundle qpdf (used to repair PDFs with hybrid xref/object-stream outlines
+# that syncfusion_flutter_pdf can't parse directly; see lib/pdf_repair.dart)
+# so users don't need it installed separately.
+install(DIRECTORY "${CMAKE_SOURCE_DIR}/qpdf/"
+  DESTINATION "${INSTALL_BUNDLE_LIB_DIR}/qpdf"
+  COMPONENT Runtime
+  FILES_MATCHING PATTERN "*.exe" PATTERN "*.dll")
+
 # Copy the native assets provided by the build.dart from all packages.
 set(NATIVE_ASSETS_DIR "${PROJECT_BUILD_DIR}native_assets/windows/")
 install(DIRECTORY "${NATIVE_ASSETS_DIR}"
