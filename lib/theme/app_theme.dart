@@ -20,23 +20,23 @@ class AppTheme {
 
   static const Color accent = Color(0xFF2D6CDF);
 
-  static ThemeData night() => _build(
-        brightness: Brightness.dark,
-        background: _nightBackground,
-        fieldFill: _nightFieldFill,
-        border: _nightBorder,
-        text: _nightText,
-        hint: _nightHint,
-      );
+  static final ThemeData night = _build(
+    brightness: Brightness.dark,
+    background: _nightBackground,
+    fieldFill: _nightFieldFill,
+    border: _nightBorder,
+    text: _nightText,
+    hint: _nightHint,
+  );
 
-  static ThemeData day() => _build(
-        brightness: Brightness.light,
-        background: _dayBackground,
-        fieldFill: _dayFieldFill,
-        border: _dayBorder,
-        text: _dayText,
-        hint: _dayHint,
-      );
+  static final ThemeData day = _build(
+    brightness: Brightness.light,
+    background: _dayBackground,
+    fieldFill: _dayFieldFill,
+    border: _dayBorder,
+    text: _dayText,
+    hint: _dayHint,
+  );
 
   static ThemeData _build({
     required Brightness brightness,

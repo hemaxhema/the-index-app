@@ -42,6 +42,35 @@ class Store {
     _writeSettings(s);
   }
 
+  /// Folders the user has opened before, most-recently-used first, so the app
+  /// can offer a quick switcher instead of re-browsing for them.
+  List<String> get savedFolders {
+    final raw = _readSettings()['savedFolders'];
+    if (raw is List) return raw.whereType<String>().toList();
+    return [];
+  }
+
+  set savedFolders(List<String> v) {
+    final s = _readSettings()..['savedFolders'] = v;
+    _writeSettings(s);
+  }
+
+  /// Adds [folder] to the saved list, moving it to the front if already
+  /// present (case-insensitive) so the list stays most-recent-first.
+  void addSavedFolder(String folder) {
+    final list = savedFolders;
+    list.removeWhere((f) => f.toLowerCase() == folder.toLowerCase());
+    list.insert(0, folder);
+    savedFolders = list;
+  }
+
+  /// Removes [folder] from the saved list.
+  void removeSavedFolder(String folder) {
+    final list = savedFolders;
+    list.removeWhere((f) => f.toLowerCase() == folder.toLowerCase());
+    savedFolders = list;
+  }
+
   /// Which PDF viewer to use: 'sumatra' or 'foxit'. Null/unrecognized falls
   /// back to 'sumatra'.
   String? get viewerKind => _readSettings()['viewerKind'] as String?;

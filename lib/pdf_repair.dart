@@ -2,6 +2,19 @@ import 'dart:io';
 
 import 'package:path/path.dart' as p;
 
+/// Path to the qpdf executable bundled next to the app, or `'qpdf'` (PATH
+/// lookup) if the bundled copy isn't present — e.g. during `flutter run`,
+/// where the CMake install step that copies `windows/qpdf/` into place
+/// hasn't run.
+String _qpdfExecutable() {
+  final bundled = p.join(
+    p.dirname(Platform.resolvedExecutable),
+    'qpdf',
+    'qpdf.exe',
+  );
+  return File(bundled).existsSync() ? bundled : 'qpdf';
+}
+
 /// Rewrites [path] via qpdf (classic xref, no object streams) into a temp
 /// file and returns its path, or null if qpdf isn't available or fails.
 ///
@@ -19,7 +32,7 @@ String? normalizePdfViaQpdf(String path) {
   );
   try {
     final result = Process.runSync(
-      'qpdf',
+      _qpdfExecutable(),
       ['--object-streams=disable', path, tempPath],
     );
     // Exit code 3 = completed with warnings (still usable); 0 = clean.

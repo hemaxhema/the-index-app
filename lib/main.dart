@@ -2,10 +2,11 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:path/path.dart' as p;
 
+import 'dictionary_mode.dart' show dictionaryRootForm;
 import 'models.dart';
 import 'normalize.dart';
-import 'renamer.dart';
 import 'scanner.dart';
 import 'store.dart';
 import 'viewer.dart';
@@ -29,8 +30,8 @@ class BookmarkIndexApp extends StatelessWidget {
         return MaterialApp(
           title: 'فهرس الفهارس',
           debugShowCheckedModeBanner: false,
-          theme: AppTheme.day(),
-          darkTheme: AppTheme.night(),
+          theme: AppTheme.day,
+          darkTheme: AppTheme.night,
           themeMode: mode,
           home: const Directionality(
             textDirection: TextDirection.rtl,
@@ -49,7 +50,7 @@ class HomePage extends StatefulWidget {
   State<HomePage> createState() => _HomePageState();
 }
 
-class _HomePageState extends State<HomePage> {
+class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   final TextEditingController _searchCtrl = TextEditingController();
   late final FocusNode _searchFocus;
   final FocusNode _rootFocus = FocusNode(debugLabel: 'root');
@@ -79,12 +80,11 @@ class _HomePageState extends State<HomePage> {
   bool _loading = false;
   String? _status;
   int _selected = 0;
-  bool _editingEnabled = true;
-  bool _autoRefreshAfterEdit = true;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _searchFocus = FocusNode(debugLabel: 'search', onKeyEvent: _onSearchKey);
     _searchCtrl.addListener(_onSearchChanged);
     // Defer to after the first frame so the initial setState calls in
@@ -98,12 +98,24 @@ class _HomePageState extends State<HomePage> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _filterDebounce?.cancel();
     _searchCtrl.dispose();
     _searchFocus.dispose();
     _rootFocus.dispose();
     _scrollCtrl.dispose();
     super.dispose();
+  }
+
+  // Opening a book launches the external PDF viewer (see Viewer.open), which
+  // takes OS-level window focus away from this app; on Windows that clears
+  // Flutter's internal focus entirely, so CallbackShortcuts has nothing to
+  // bubble key events through until something reclaims it (see
+  // _reclaimFocus). Do that as soon as this window becomes active again,
+  // instead of requiring an extra throwaway click first.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) _reclaimFocus();
   }
 
   // Search box changed: coalesce bursts of keystrokes into a single filter
@@ -131,10 +143,20 @@ class _HomePageState extends State<HomePage> {
       context,
       initial: _index?.folder ?? Store.instance.lastFolder,
     );
+    _reclaimFocus();
     if (!mounted || picked == null) return;
-    final cached = Store.instance.loadCache(picked);
+    await _switchToFolder(picked);
+  }
+
+  /// Opens [folder], reusing its cache when available. Shared by the folder
+  /// picker and the saved-folders switcher so both keep the saved-folder list
+  /// and cache-vs-rescan logic in one place.
+  Future<void> _switchToFolder(String folder) async {
+    if (_index?.folder == folder) return; // already open
+    final cached = Store.instance.loadCache(folder);
     if (cached != null) {
-      Store.instance.lastFolder = picked;
+      Store.instance.lastFolder = folder;
+      Store.instance.addSavedFolder(folder);
       setState(() {
         _index = cached;
         _selected = 0;
@@ -142,7 +164,7 @@ class _HomePageState extends State<HomePage> {
       _applyFilter();
       _searchFocus.requestFocus();
     } else {
-      await _scan(picked); // first time opening this folder
+      await _scan(folder); // first time opening this folder
     }
   }
 
@@ -167,6 +189,7 @@ class _HomePageState extends State<HomePage> {
         dictionaryModeOverride: previousDictOverride,
       );
       Store.instance.lastFolder = folder;
+      Store.instance.addSavedFolder(folder);
       Store.instance.saveCache(idx);
       setState(() {
         _index = idx;
@@ -246,24 +269,6 @@ class _HomePageState extends State<HomePage> {
                             setDialogState(() {});
                           },
                   ),
-                  SwitchListTile(
-                    secondary: Icon(_autoRefreshAfterEdit ? Icons.sync : Icons.sync_disabled),
-                    title: const Text('التحديث التلقائي بعد التعديل/الحذف'),
-                    value: _autoRefreshAfterEdit,
-                    onChanged: (v) {
-                      setState(() => _autoRefreshAfterEdit = v);
-                      setDialogState(() {});
-                    },
-                  ),
-                  SwitchListTile(
-                    secondary: Icon(_editingEnabled ? Icons.edit : Icons.edit_off),
-                    title: const Text('تفعيل التعديل (إعادة تسمية / حذف)'),
-                    value: _editingEnabled,
-                    onChanged: (v) {
-                      setState(() => _editingEnabled = v);
-                      setDialogState(() {});
-                    },
-                  ),
                   ListTile(
                     leading: const Icon(Icons.picture_as_pdf_outlined),
                     title: const Text('إعدادات عارض PDF'),
@@ -290,6 +295,85 @@ class _HomePageState extends State<HomePage> {
         ),
       ),
     );
+    _reclaimFocus();
+  }
+
+  /// Lets the user switch to a previously-opened folder without re-browsing
+  /// for it, and prune entries from that list.
+  Future<void> _showSwitchFolderDialog() async {
+    final folders = Store.instance.savedFolders;
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          title: const Text('التبديل بين المجلدات'),
+          content: SizedBox(
+            width: 460,
+            height: 420,
+            child: folders.isEmpty
+                ? const Center(child: Text('لا توجد مجلدات محفوظة بعد'))
+                : ListView.builder(
+                    itemCount: folders.length,
+                    itemBuilder: (c, i) {
+                      final f = folders[i];
+                      final isCurrent = _index?.folder == f;
+                      final cs = Theme.of(ctx).colorScheme;
+                      return ListTile(
+                        leading: Icon(
+                          isCurrent ? Icons.folder_open : Icons.folder,
+                          color: isCurrent ? cs.primary : null,
+                        ),
+                        title: Text(p.basename(f),
+                            maxLines: 1, overflow: TextOverflow.ellipsis),
+                        subtitle: Text(f,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant)),
+                        selected: isCurrent,
+                        trailing: IconButton(
+                          tooltip: 'إزالة من القائمة',
+                          icon: const Icon(Icons.close, size: 18),
+                          onPressed: () {
+                            Store.instance.removeSavedFolder(f);
+                            setDialogState(() => folders.removeAt(i));
+                          },
+                        ),
+                        onTap: isCurrent
+                            ? null
+                            : () {
+                                Navigator.pop(ctx);
+                                _switchToFolder(f);
+                              },
+                      );
+                    },
+                  ),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('إغلاق')),
+          ],
+        ),
+      ),
+    );
+    _reclaimFocus();
+  }
+
+  /// Ctrl+R: shows the "next" saved folder (relative to the one currently
+  /// open) in a small dialog; further Ctrl+R presses while it's open advance
+  /// to the following one (see [_FolderSwitcherDialog]). Enter opens whatever
+  /// is shown, Esc cancels. A no-op when there's nothing else to switch to.
+  Future<void> _openFolderSwitcher() async {
+    final folders = Store.instance.savedFolders;
+    if (folders.length < 2) return;
+    final currentIdx = folders.indexWhere(
+        (f) => f.toLowerCase() == (_index?.folder ?? '').toLowerCase());
+    final startIndex = (currentIdx < 0 ? 0 : currentIdx + 1) % folders.length;
+    final result = await showDialog<String>(
+      context: context,
+      builder: (_) => _FolderSwitcherDialog(folders: folders, startIndex: startIndex),
+    );
+    _reclaimFocus();
+    if (!mounted || result == null) return;
+    await _switchToFolder(result);
   }
 
   Future<void> _showFolderOrderDialog() async {
@@ -362,6 +446,7 @@ class _HomePageState extends State<HomePage> {
         ),
       ),
     );
+    _reclaimFocus();
     if (!mounted || saved == null) return;
     final (newOrder, newDisabled) = saved;
     setState(() => _index = _index!.reordered(newOrder, disabledFolders: newDisabled));
@@ -379,20 +464,33 @@ class _HomePageState extends State<HomePage> {
 
   void _applyFilter() {
     final idx = _index;
-    final q = normalizeTitle(_searchCtrl.text);
     List<Topic> res;
     if (idx == null) {
       res = const [];
-    } else if (q.isEmpty) {
-      res = idx.topics;
     } else {
-      final tokens = q.split(' ').where((t) => t.isNotEmpty).toList();
-      res = idx.topics
-          .where((t) => tokens.every((tok) => t.key.contains(tok)))
-          .toList();
-      // A bookmark whose key matches the search text exactly floats to the top.
-      final exact = res.indexWhere((t) => t.key == q);
-      if (exact > 0) res.insert(0, res.removeAt(exact));
+      // In dictionary-mode folders, topic keys are built from the root-letter
+      // form of the title (see LibraryIndex.build), so the typed text must go
+      // through that same dictionaryRootForm step before normalizeTitle, or a
+      // full surface spelling (e.g. "عضعض") would never match its collapsed
+      // root key (e.g. "عضض").
+      final q = normalizeTitle(idx.dictionaryMode
+          ? dictionaryRootForm(_searchCtrl.text)
+          : _searchCtrl.text);
+      if (q.isEmpty) {
+        res = idx.topics;
+      } else {
+        // dictionaryRootForm strips all internal whitespace, so a dictionary-
+        // mode query is always a single token rather than space-separated words.
+        final tokens = idx.dictionaryMode
+            ? [q]
+            : q.split(' ').where((t) => t.isNotEmpty).toList();
+        res = idx.topics
+            .where((t) => tokens.every((tok) => t.key.contains(tok)))
+            .toList();
+        // A bookmark whose key matches the search text exactly floats to the top.
+        final exact = res.indexWhere((t) => t.key == q);
+        if (exact > 0) res.insert(0, res.removeAt(exact));
+      }
     }
     setState(() {
       _filtered = res;
@@ -444,7 +542,7 @@ class _HomePageState extends State<HomePage> {
     if (t != null && i >= 0 && i < t.byBook.length) _openHit(t.byBook[i]);
   }
 
-  /// Alt+E: open the "all books" dialog for the selected topic, as if its
+  /// Ctrl+E: open the "all books" dialog for the selected topic, as if its
   /// [_allBooksButton] had been tapped.
   void _openAllBooksForCurrent() {
     _flushFilter();
@@ -459,163 +557,27 @@ class _HomePageState extends State<HomePage> {
     await Viewer.open(book.path, page);
   }
 
-  // ---- rename / delete ----
-
-  Future<void> _showBookmarkMenu(
-    Offset position, {
-    required VoidCallback onRename,
-    required VoidCallback onDelete,
-  }) async {
-    if (!_editingEnabled) return;
-    final selected = await showMenu<String>(
-      context: context,
-      position: RelativeRect.fromLTRB(position.dx, position.dy, position.dx, position.dy),
-      items: const [
-        PopupMenuItem(value: 'rename', child: Text('إعادة تسمية')),
-        PopupMenuItem(value: 'delete', child: Text('حذف')),
-      ],
-    );
-    if (selected == 'rename') onRename();
-    if (selected == 'delete') onDelete();
-  }
-
-  Future<bool> _confirmDelete(String title) async {
-    final result = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('حذف الفهرس'),
-        content: Text('هل تريد حذف "$title"؟ لا يمكن التراجع عن هذا الإجراء.'),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('إلغاء')),
-          FilledButton(
-            style: FilledButton.styleFrom(backgroundColor: Theme.of(ctx).colorScheme.error),
-            onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('حذف'),
-          ),
-        ],
-      ),
-    );
-    return result ?? false;
-  }
-
-  Future<String?> _promptRename(String currentTitle) {
-    final ctrl = TextEditingController(text: currentTitle);
-    return showDialog<String>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('إعادة تسمية العنوان'),
-        content: TextField(
-          controller: ctrl,
-          autofocus: true,
-          onSubmitted: (v) => Navigator.pop(ctx, v.trim()),
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('إلغاء')),
-          FilledButton(
-            onPressed: () => Navigator.pop(ctx, ctrl.text.trim()),
-            child: const Text('حفظ'),
-          ),
-        ],
-      ),
-    );
-  }
-
-  /// Rename this topic's bookmark across every book it appears in.
-  Future<void> _renameTopicRow(Topic t) async {
-    final newTitle = await _promptRename(t.display);
-    if (!mounted || newTitle == null || newTitle.isEmpty || newTitle == t.display) return;
-    await _runRename(
-        () => renameTopicEverywhere(index: _index!, topic: t, newTitle: newTitle));
-  }
-
-  /// Rename this topic's bookmark inside a single book only, scoped to the
-  /// specific chip's page(s) so other pages of the same topic in this book
-  /// (shown as separate chips) are left untouched.
-  Future<void> _renameTopicChip(Topic t, BookHit hit) async {
-    final current = hit.distinctOriginalTitles.isNotEmpty
-        ? hit.distinctOriginalTitles.first
-        : t.display;
-    final newTitle = await _promptRename(current);
-    if (!mounted || newTitle == null || newTitle.isEmpty || newTitle == current) return;
-    await _runRename(() => renameTopicInBook(
-        index: _index!, topic: t, bookId: hit.bookId, pages: hit.pages, newTitle: newTitle));
-  }
-
-  Future<void> _runRename(Future<void> Function() action) => _runMutation(
-        action,
-        progressText: 'إعادة التسمية…',
-        errorPrefix: 'تعذّرت إعادة التسمية',
-      );
-
-  /// Delete this topic's bookmark across every book it appears in.
-  Future<void> _deleteTopicRow(Topic t) async {
-    if (!await _confirmDelete(t.display)) return;
-    if (!mounted) return;
-    await _runDelete(() => deleteTopicEverywhere(index: _index!, topic: t));
-  }
-
-  /// Delete this topic's bookmark inside a single book only, scoped to the
-  /// specific chip's page(s) so other pages of the same topic in this book
-  /// (shown as separate chips) are left untouched.
-  Future<void> _deleteTopicChip(Topic t, BookHit hit) async {
-    final current = hit.distinctOriginalTitles.isNotEmpty
-        ? hit.distinctOriginalTitles.first
-        : t.display;
-    if (!await _confirmDelete(current)) return;
-    if (!mounted) return;
-    await _runDelete(() => deleteTopicInBook(
-        index: _index!, topic: t, bookId: hit.bookId, pages: hit.pages));
-  }
-
-  Future<void> _runDelete(Future<void> Function() action) => _runMutation(
-        action,
-        progressText: 'الحذف…',
-        errorPrefix: 'تعذّر الحذف',
-      );
-
-  Future<void> _runMutation(
-    Future<void> Function() action, {
-    required String progressText,
-    required String errorPrefix,
-  }) async {
-    final folder = _index?.folder;
-    if (folder == null) return;
-    setState(() {
-      _loading = true;
-      _status = progressText;
-    });
-    try {
-      await action();
-      if (!mounted) return;
-      if (_autoRefreshAfterEdit) {
-        await _scan(folder); // rescan so the change reflects everywhere
-      } else {
-        setState(() {
-          _loading = false;
-          _status = null;
-        });
-      }
-    } catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _loading = false;
-        _status = '$errorPrefix: $e';
-      });
-    }
-  }
-
   void _focusSearch() {
     _searchFocus.requestFocus();
     _searchCtrl.selection =
         TextSelection(baseOffset: 0, extentOffset: _searchCtrl.text.length);
   }
 
+  /// Dialogs/menus (showDialog/showMenu) are routes outside the
+  /// CallbackShortcuts subtree in build(), so nothing here holds focus while
+  /// they're open. Call this right after such a route closes so global
+  /// shortcuts (Ctrl+F, F1, ...) and list navigation keep working instead of
+  /// going dead until the next click.
+  void _reclaimFocus() {
+    if (!mounted) return;
+    if (!_searchFocus.hasFocus && !_rootFocus.hasFocus) _searchFocus.requestFocus();
+  }
+
   /// Global shortcuts (work even while the search box is focused):
   /// Ctrl+F focuses search; Ctrl+1..9 opens the selected topic's Nth book;
-  /// Alt+E opens the "all books" dialog for the selected topic; F1 opens the
+  /// Ctrl+E opens the "all books" dialog for the selected topic; F1 opens the
   /// help dialog.
-  /// Uses SingleActivator (via CallbackShortcuts) so Alt combos match reliably
-  /// on Windows, where Alt+key arrives as a system key.
+  /// Uses SingleActivator (via CallbackShortcuts) for reliable matching.
   Map<ShortcutActivator, VoidCallback> _globalShortcuts() {
     const topRow = [
       LogicalKeyboardKey.digit1, LogicalKeyboardKey.digit2,
@@ -633,8 +595,9 @@ class _HomePageState extends State<HomePage> {
     ];
     final bindings = <ShortcutActivator, VoidCallback>{
       const SingleActivator(LogicalKeyboardKey.keyF, control: true): _focusSearch,
-      const SingleActivator(LogicalKeyboardKey.keyE, alt: true):
+      const SingleActivator(LogicalKeyboardKey.keyE, control: true):
           _openAllBooksForCurrent,
+      const SingleActivator(LogicalKeyboardKey.keyR, control: true): _openFolderSwitcher,
       const SingleActivator(LogicalKeyboardKey.f1): _showHelpDialog,
     };
     for (var i = 0; i < 9; i++) {
@@ -657,6 +620,13 @@ class _HomePageState extends State<HomePage> {
     }
     if (k == LogicalKeyboardKey.escape) {
       _rootFocus.requestFocus();
+      return KeyEventResult.handled;
+    }
+    if (k == LogicalKeyboardKey.enter || k == LogicalKeyboardKey.numpadEnter) {
+      _flushFilter();
+      if (_filtered.isNotEmpty) setState(() => _selected = 0);
+      _rootFocus.requestFocus();
+      _ensureVisible();
       return KeyEventResult.handled;
     }
     return KeyEventResult.ignored; // let text input through
@@ -705,9 +675,25 @@ class _HomePageState extends State<HomePage> {
           onKeyEvent: _onRootKey,
           child: Scaffold(
         appBar: AppBar(
-          title: const Text(
-            'فهرس الفهارس',
-            style: TextStyle(fontFamily: 'Typokar'),
+          title: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text(
+                'فهرس الفهارس',
+                style: TextStyle(fontFamily: 'Typokar'),
+              ),
+              if (_index != null) ...[
+                const SizedBox(width: 8),
+                Text(
+                  '- ${p.basename(_index!.folder)}',
+                  style: Theme.of(context)
+                      .textTheme
+                      .titleLarge
+                      ,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ],
+            ],
           ),
           actions: [
             ValueListenableBuilder<ThemeMode>(
@@ -728,9 +714,19 @@ class _HomePageState extends State<HomePage> {
               onPressed: _loading ? null : _chooseFolder,
             ),
             IconButton(
+              tooltip: 'التبديل بين المجلدات المحفوظة',
+              icon: const Icon(Icons.folder_copy_outlined),
+              onPressed: _loading ? null : _showSwitchFolderDialog,
+            ),
+            IconButton(
               tooltip: 'خيارات',
               icon: const Icon(Icons.settings_outlined),
               onPressed: _showOptionsDialog,
+            ),
+            IconButton(
+              tooltip: 'مساعدة (F1)',
+              icon: const Icon(Icons.help_outline),
+              onPressed: _showHelpDialog,
             ),
           ],
         ),
@@ -880,11 +876,6 @@ class _HomePageState extends State<HomePage> {
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
       onTap: () => setState(() => _selected = i),
-      onSecondaryTapUp: (details) => _showBookmarkMenu(
-        details.globalPosition,
-        onRename: () => _renameTopicRow(t),
-        onDelete: () => _deleteTopicRow(t),
-      ),
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
         decoration: BoxDecoration(
@@ -1011,28 +1002,21 @@ class _HomePageState extends State<HomePage> {
 
   Widget _bookChip(int rowIndex, Topic t, int j, bool selected, ColorScheme cs) {
     final hit = t.byBook[j];
-    return GestureDetector(
-      onSecondaryTapUp: (details) => _showBookmarkMenu(
-        details.globalPosition,
-        onRename: () => _renameTopicChip(t, hit),
-        onDelete: () => _deleteTopicChip(t, hit),
-      ),
-      child: ActionChip(
-        visualDensity: VisualDensity.compact,
-        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-        avatar: (selected && j < 9)
-            ? CircleAvatar(
-                backgroundColor: cs.primary,
-                child: Text('${j + 1}',
-                    style: TextStyle(fontSize: 11, color: cs.onPrimary)),
-              )
-            : null,
-        label: _chipLabel(hit),
-        onPressed: () {
-          setState(() => _selected = rowIndex);
-          _openHit(hit);
-        },
-      ),
+    return ActionChip(
+      visualDensity: VisualDensity.compact,
+      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+      avatar: (selected && j < 9)
+          ? CircleAvatar(
+              backgroundColor: cs.primary,
+              child: Text('${j + 1}',
+                  style: TextStyle(fontSize: 11, color: cs.onPrimary)),
+            )
+          : null,
+      label: _chipLabel(hit),
+      onPressed: () {
+        setState(() => _selected = rowIndex);
+        _openHit(hit);
+      },
     );
   }
 
@@ -1086,30 +1070,23 @@ class _HomePageState extends State<HomePage> {
                 itemCount: t.byBook.length,
                 itemBuilder: (c, j) {
                   final hit = t.byBook[j];
-                  return GestureDetector(
-                    onSecondaryTapUp: (details) => _showBookmarkMenu(
-                      details.globalPosition,
-                      onRename: () => _renameTopicChip(t, hit),
-                      onDelete: () => _deleteTopicChip(t, hit),
-                    ),
-                    child: ListTile(
-                      dense: true,
-                      leading: j < 9
-                          ? CircleAvatar(
-                              radius: 12,
-                              backgroundColor: cs.primary,
-                              child: Text('${j + 1}',
-                                  style: TextStyle(
-                                      fontSize: 11, color: cs.onPrimary)),
-                            )
-                          : null,
-                      title: _chipLabel(hit, constrained: true),
-                      onTap: () {
-                        Navigator.pop(ctx);
-                        setState(() => _selected = rowIndex);
-                        _openHit(hit);
-                      },
-                    ),
+                  return ListTile(
+                    dense: true,
+                    leading: j < 9
+                        ? CircleAvatar(
+                            radius: 12,
+                            backgroundColor: cs.primary,
+                            child: Text('${j + 1}',
+                                style: TextStyle(
+                                    fontSize: 11, color: cs.onPrimary)),
+                          )
+                        : null,
+                    title: _chipLabel(hit, constrained: true),
+                    onTap: () {
+                      Navigator.pop(ctx);
+                      setState(() => _selected = rowIndex);
+                      _openHit(hit);
+                    },
                   );
                 },
               ),
@@ -1123,12 +1100,14 @@ class _HomePageState extends State<HomePage> {
         );
       },
     );
+    _reclaimFocus();
   }
 
   /// Opens the PDF viewer settings dialog, then refreshes the status bar so
   /// the "displayed via" text reflects any change.
   Future<void> _showViewerSettings() async {
     await showViewerSettingsDialog(context);
+    _reclaimFocus();
     if (!mounted) return;
     setState(() {});
   }
@@ -1163,14 +1142,28 @@ class _HomePageState extends State<HomePage> {
                       style: TextStyle(color: cs.onSurfaceVariant, height: 1.5),
                     ),
                     const SizedBox(height: 18),
+                    _helpSectionTitle('وضع المعجم', textTheme),
+                    Text(
+                      'إذا احتوى اسم المجلد على كلمة مثل "معجم" أو "معاجم" أو '
+                      '"dictionary"، يُفعَّل تلقائيًا وضع خاص يجمع عناوين الفهارس '
+                      'حسب جذرها اللغوي بدل تطابق النص الحرفي: تُوحَّد صور الهمزة '
+                      '(أ/إ/آ/ؤ/ئ) إلى ء، والحروف الضعيفة (ا/ي/ى) إلى و، ويُستنتج '
+                      'الجذر الثلاثي من الصيغة الثنائية (عض ← عضض) والرباعية '
+                      'المكررة (عضعض ← عضض). بهذا تجتمع صيغ الجذر الواحد '
+                      'المتفرقة بين معاجم مختلفة في صفٍّ واحد.',
+                      style: TextStyle(color: cs.onSurfaceVariant, height: 1.5),
+                    ),
+                    const SizedBox(height: 18),
                     _helpSectionTitle('اختصارات عامة (تعمل من أي مكان)', textTheme),
                     _shortcutRow('Ctrl + F', 'تركيز مربع البحث (يحدد النص الحالي)', cs),
                     _shortcutRow('Ctrl + 1 … 9', 'فتح الموضوع المحدد في الكتاب رقم N', cs),
-                    _shortcutRow('Alt + E', 'عرض كل كتب الموضوع المحدد', cs),
+                    _shortcutRow('Ctrl + E', 'عرض كل كتب الموضوع المحدد', cs),
+                    _shortcutRow('Ctrl + R', 'التبديل السريع للمجلد التالي المحفوظ (اضغطها مرة أخرى للتنقل، Enter للفتح)', cs),
                     _shortcutRow('F1', 'فتح نافذة المساعدة هذه', cs),
                     const SizedBox(height: 14),
                     _helpSectionTitle('أثناء الكتابة في مربع البحث', textTheme),
                     _shortcutRow('↑ / ↓', 'تحريك التحديد بين النتائج', cs),
+                    _shortcutRow('Enter', 'نقل التركيز إلى أول نتيجة', cs),
                     _shortcutRow('Esc', 'نقل التركيز إلى القائمة (لا يمسح نص البحث)', cs),
                     const SizedBox(height: 14),
                     _helpSectionTitle('عند تركيز القائمة (خارج مربع البحث)', textTheme),
@@ -1180,11 +1173,10 @@ class _HomePageState extends State<HomePage> {
                     const SizedBox(height: 18),
                     _helpSectionTitle('الفأرة', textTheme),
                     _shortcutRow('نقر', 'تحديد الصف، أو فتح الكتاب مباشرة عند النقر عليه', cs),
-                    _shortcutRow('نقر يمين', 'قائمة إعادة تسمية / حذف لصف أو كتاب (عند تفعيل التعديل)', cs),
-                    _shortcutRow('عرض الكل', 'يعرض كل كتب الموضوع عندما تكون أكثر مما يظهر في الصف', cs),
                     const SizedBox(height: 18),
                     _helpSectionTitle('أزرار الشريط العلوي', textTheme),
                     _shortcutRow('اختيار مجلد', 'فتح مجلد كتب جديد وبدء فحصه', cs),
+                    _shortcutRow('التبديل بين المجلدات', 'التنقل السريع بين المجلدات المفتوحة سابقًا', cs),
                     _shortcutRow('إعادة الفحص', 'إعادة فحص المجلد الحالي (بعد إضافة كتب جديدة مثلًا)', cs),
                     _shortcutRow('ترتيب المجلدات', 'فتح نافذة لتخصيص ترتيب ظهور المجلدات', cs),
                     _shortcutRow('التحديث التلقائي', 'تبديل تحديث القائمة تلقائيًا بعد إعادة التسمية أو الحذف', cs),
@@ -1202,6 +1194,7 @@ class _HomePageState extends State<HomePage> {
         );
       },
     );
+    _reclaimFocus();
   }
 
   Widget _helpSectionTitle(String text, TextTheme textTheme) {
@@ -1249,5 +1242,115 @@ class _HomePageState extends State<HomePage> {
     final shown = pages.take(maxShown).join('، ');
     final extra = pages.length - maxShown;
     return extra > 0 ? 'ص $shown +$extra' : 'ص $shown';
+  }
+}
+
+/// Ctrl+R quick switcher (see [_HomePageState._openFolderSwitcher]): shows
+/// the currently-cycled-to saved folder; Ctrl+R again advances to the next
+/// one, Enter opens it, Esc cancels. Owns its own [FocusNode] so it can
+/// intercept Ctrl+R directly rather than relying on the app's global
+/// shortcut map, which the dialog's route sits outside of.
+class _FolderSwitcherDialog extends StatefulWidget {
+  const _FolderSwitcherDialog({required this.folders, required this.startIndex});
+
+  final List<String> folders;
+  final int startIndex;
+
+  @override
+  State<_FolderSwitcherDialog> createState() => _FolderSwitcherDialogState();
+}
+
+class _FolderSwitcherDialogState extends State<_FolderSwitcherDialog> {
+  late int _index = widget.startIndex;
+  final FocusNode _focus = FocusNode(debugLabel: 'folderSwitcher');
+
+  @override
+  void dispose() {
+    _focus.dispose();
+    super.dispose();
+  }
+
+  KeyEventResult _onKey(FocusNode node, KeyEvent e) {
+    if (e is! KeyDownEvent && e is! KeyRepeatEvent) return KeyEventResult.ignored;
+    final k = e.logicalKey;
+    if (k == LogicalKeyboardKey.keyR && HardwareKeyboard.instance.isControlPressed) {
+      setState(() => _index = (_index + 1) % widget.folders.length);
+      return KeyEventResult.handled;
+    }
+    if (k == LogicalKeyboardKey.enter || k == LogicalKeyboardKey.numpadEnter) {
+      Navigator.pop(context, widget.folders[_index]);
+      return KeyEventResult.handled;
+    }
+    if (k == LogicalKeyboardKey.escape) {
+      Navigator.pop(context);
+      return KeyEventResult.handled;
+    }
+    return KeyEventResult.ignored;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final folder = widget.folders[_index];
+    return Focus(
+      focusNode: _focus,
+      autofocus: true,
+      onKeyEvent: _onKey,
+      child: AlertDialog(
+        title: const Text('التبديل السريع بين المجلدات'),
+        content: SizedBox(
+          width: 460,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // The folder currently being cycled to: made deliberately
+              // oversized and boxed so it reads instantly during a rapid
+              // Ctrl+R … Ctrl+R … Enter sequence, unlike the small path text
+              // below it.
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 20),
+                decoration: BoxDecoration(
+                  color: cs.primaryContainer,
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(color: cs.primary, width: 2),
+                ),
+                child: Row(
+                  children: [
+                    Icon(Icons.folder, size: 40, color: cs.primary),
+                    const SizedBox(width: 14),
+                    Expanded(
+                      child: Text(
+                        p.basename(folder),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 26,
+                          fontWeight: FontWeight.bold,
+                          color: cs.onPrimaryContainer,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 10),
+              Text(
+                folder,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
+              ),
+              const SizedBox(height: 16),
+              Text(
+                '${_index + 1} / ${widget.folders.length}   ·   Ctrl+R للتالي   ·   Enter للفتح   ·   Esc للإلغاء',
+                style: TextStyle(fontSize: 11.5, color: cs.onSurfaceVariant),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 }
