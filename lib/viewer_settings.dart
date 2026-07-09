@@ -66,15 +66,15 @@ class _ViewerSettingsDialogState extends State<_ViewerSettingsDialog> {
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
     return AlertDialog(
-      title: const Text('إعدادات عارض PDF'),
+      title: const Text('pdfإعدادات عارض ال'),
       content: SizedBox(
-        width: 520,
+        width: 520, 
         child: SingleChildScrollView(
           child: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              _kindTile(ViewerKind.sumatra, 'SumatraPDF'),
+              _kindTile(ViewerKind.sumatra, 'SumatraPDF (موصى به)'),
               if (_kind == ViewerKind.sumatra)
                 _pathRow(_sumatraCtrl, hint: r'مثال: C:\Program Files\SumatraPDF\SumatraPDF.exe'),
               _kindTile(ViewerKind.foxit, 'Foxit Reader'),

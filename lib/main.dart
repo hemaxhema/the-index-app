@@ -271,7 +271,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   ),
                   ListTile(
                     leading: const Icon(Icons.picture_as_pdf_outlined),
-                    title: const Text('إعدادات عارض PDF'),
+                    title: const Text('pdfإعدادات عارض ال'),
                     onTap: () {
                       Navigator.pop(ctx);
                       _showViewerSettings();
