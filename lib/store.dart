@@ -71,8 +71,8 @@ class Store {
     savedFolders = list;
   }
 
-  /// Which PDF viewer to use: 'sumatra' or 'foxit'. Null/unrecognized falls
-  /// back to 'sumatra'.
+  /// Which PDF viewer to use: 'sumatra', 'foxit', or 'chrome'. Null/unrecognized
+  /// falls back to 'sumatra'.
   String? get viewerKind => _readSettings()['viewerKind'] as String?;
   set viewerKind(String? v) {
     final s = _readSettings()..['viewerKind'] = v;
@@ -90,6 +90,13 @@ class Store {
   String? get foxitPath => _readSettings()['foxitPath'] as String?;
   set foxitPath(String? v) {
     final s = _readSettings()..['foxitPath'] = v;
+    _writeSettings(s);
+  }
+
+  /// Explicit Chrome executable path (optional; auto-detected otherwise).
+  String? get chromePath => _readSettings()['chromePath'] as String?;
+  set chromePath(String? v) {
+    final s = _readSettings()..['chromePath'] = v;
     _writeSettings(s);
   }
 

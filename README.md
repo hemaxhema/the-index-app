@@ -44,9 +44,11 @@ In-app: click the **?** icon in the toolbar (or press `F1`) for the full list.
   diacritics + tatweel, unify alef/ya/ta-marbuta variants, normalize digits and
   punctuation, collapse whitespace. Titles with the same normalized key are
   grouped into one `Topic`. Cross-book topics are listed first.
-- **Viewer** — prefers **SumatraPDF** (`-reuse-instance -page N`, reuses one
-  window). Falls back to the default browser via `file://…#page=N`. See
-  `lib/viewer.dart`. Set a custom viewer path in the settings JSON if needed.
+- **Viewer** — supports **SumatraPDF** (`-reuse-instance -page N`), **Foxit
+  Reader** (`/A page=N`), or **Chrome** (`file://…#page=N`). Defaults to
+  SumatraPDF. Falls back to the default browser via `file://…#page=N` if the
+  chosen viewer isn't found. See `lib/viewer.dart`. Select a viewer or set a
+  custom path in the PDF viewer settings dialog.
 - **Storage** — settings and a per-folder index cache live under
   `%APPDATA%\bookmark_index\` as plain JSON (`lib/store.dart`). No platform
   plugins are used, so no "Developer Mode" is required to build.

@@ -25,6 +25,7 @@ class _ViewerSettingsDialogState extends State<_ViewerSettingsDialog> {
   late ViewerKind _kind;
   late final TextEditingController _sumatraCtrl;
   late final TextEditingController _foxitCtrl;
+  late final TextEditingController _chromeCtrl;
 
   @override
   void initState() {
@@ -32,12 +33,14 @@ class _ViewerSettingsDialogState extends State<_ViewerSettingsDialog> {
     _kind = Viewer.kind;
     _sumatraCtrl = TextEditingController(text: Store.instance.viewerPath ?? '');
     _foxitCtrl = TextEditingController(text: Store.instance.foxitPath ?? '');
+    _chromeCtrl = TextEditingController(text: Store.instance.chromePath ?? '');
   }
 
   @override
   void dispose() {
     _sumatraCtrl.dispose();
     _foxitCtrl.dispose();
+    _chromeCtrl.dispose();
     super.dispose();
   }
 
@@ -54,7 +57,8 @@ class _ViewerSettingsDialogState extends State<_ViewerSettingsDialog> {
     Store.instance
       ..viewerKind = _kind.name
       ..viewerPath = _sumatraCtrl.text.trim()
-      ..foxitPath = _foxitCtrl.text.trim();
+      ..foxitPath = _foxitCtrl.text.trim()
+      ..chromePath = _chromeCtrl.text.trim();
     Navigator.pop(context);
   }
 
@@ -77,6 +81,10 @@ class _ViewerSettingsDialogState extends State<_ViewerSettingsDialog> {
               if (_kind == ViewerKind.foxit)
                 _pathRow(_foxitCtrl,
                     hint: r'مثال: C:\Program Files\Foxit Software\Foxit PDF Reader\FoxitPDFReader.exe'),
+              _kindTile(ViewerKind.chrome, 'Chrome'),
+              if (_kind == ViewerKind.chrome)
+                _pathRow(_chromeCtrl,
+                    hint: r'مثال: C:\Program Files\Google\Chrome\Application\chrome.exe'),
               const SizedBox(height: 8),
               Text(
                 'إن لم يُعثر على البرنامج، سيُفتح الملف في المتصفح الافتراضي بدلًا منه.',

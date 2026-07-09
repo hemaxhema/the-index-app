@@ -5,7 +5,7 @@ import 'package:path/path.dart' as p;
 import 'store.dart';
 
 /// Which PDF viewer to launch.
-enum ViewerKind { sumatra, foxit }
+enum ViewerKind { sumatra, foxit, chrome }
 
 ViewerKind _parseKind(String? raw) {
   for (final k in ViewerKind.values) {
@@ -17,10 +17,10 @@ ViewerKind _parseKind(String? raw) {
 /// Opens a PDF at a specific page in an external viewer, or an HTML file in
 /// the default browser.
 ///
-/// Supports SumatraPDF (`-reuse-instance -page N`) or Foxit Reader
-/// (`<file> /A page=N`). If the chosen viewer's executable can't be found,
-/// falls back to opening the file URL with `#page=N` in the default browser
-/// (Edge/Chrome honor the fragment).
+/// Supports SumatraPDF (`-reuse-instance -page N`), Foxit Reader
+/// (`<file> /A page=N`), or Chrome (`file:///<path>#page=N`). If the chosen
+/// viewer's executable can't be found, falls back to opening the file URL
+/// with `#page=N` in the default browser (Edge/Chrome honor the fragment).
 class Viewer {
   static const _sumatraCandidates = [
     r'C:\Program Files\SumatraPDF\SumatraPDF.exe',
@@ -32,6 +32,11 @@ class Viewer {
     r'C:\Program Files (x86)\Foxit Software\Foxit PDF Reader\FoxitPDFReader.exe',
     r'C:\Program Files\Foxit Software\Foxit Reader\FoxitReader.exe',
     r'C:\Program Files (x86)\Foxit Software\Foxit Reader\FoxitReader.exe',
+  ];
+
+  static const _chromeCandidates = [
+    r'C:\Program Files\Google\Chrome\Application\chrome.exe',
+    r'C:\Program Files (x86)\Google\Chrome\Application\chrome.exe',
   ];
 
   static ViewerKind get kind => _parseKind(Store.instance.viewerKind);
@@ -65,6 +70,23 @@ class Viewer {
     return null;
   }
 
+  /// Returns the Chrome path to use, or null if none found.
+  static String? findChrome() {
+    final configured = Store.instance.chromePath;
+    if (configured != null && configured.isNotEmpty && File(configured).existsSync()) {
+      return configured;
+    }
+    final local = Platform.environment['LOCALAPPDATA'];
+    final candidates = [
+      ..._chromeCandidates,
+      if (local != null) '$local\\Google\\Chrome\\Application\\chrome.exe',
+    ];
+    for (final c in candidates) {
+      if (File(c).existsSync()) return c;
+    }
+    return null;
+  }
+
   /// Human-readable description of what will be used to open PDFs. Cached: it
   /// is read on every status-bar rebuild, and finding a viewer touches the
   /// disk (File.existsSync per candidate) — far too costly to repeat per
@@ -84,6 +106,10 @@ class Viewer {
         return findFoxit() != null
             ? 'Foxit Reader'
             : 'Foxit Reader (غير موجود، سيُستخدم المتصفح)';
+      case ViewerKind.chrome:
+        return findChrome() != null
+            ? 'Chrome'
+            : 'Chrome (غير موجود، سيُستخدم المتصفح)';
     }
   }
 
@@ -115,6 +141,10 @@ class Viewer {
         final foxit = findFoxit();
         if (foxit != null) return _launchFoxit(foxit, pdfPath, safePage);
         return _openInBrowser(pdfPath, safePage);
+      case ViewerKind.chrome:
+        final chrome = findChrome();
+        if (chrome != null) return _launchChrome(chrome, pdfPath, safePage);
+        return _openInBrowser(pdfPath, safePage);
     }
   }
 
@@ -130,6 +160,15 @@ class Viewer {
     await Process.start(
       exe,
       [pdfPath, '/A', 'page=$page'],
+      mode: ProcessStartMode.detached,
+    );
+  }
+
+  static Future<void> _launchChrome(String exe, String pdfPath, int page) async {
+    final url = '${Uri.file(pdfPath)}#page=$page';
+    await Process.start(
+      exe,
+      [url],
       mode: ProcessStartMode.detached,
     );
   }
