@@ -5,7 +5,7 @@ import 'store.dart';
 import 'viewer.dart';
 
 /// Opens the "PDF viewer" settings dialog, letting the user pick which
-/// program opens PDFs (SumatraPDF or Foxit Reader) and its path.
+/// program opens PDFs (SumatraPDF or Foxit Reader/Editor) and its path.
 Future<void> showViewerSettingsDialog(BuildContext context) async {
   await showDialog<void>(
     context: context,
@@ -66,7 +66,7 @@ class _ViewerSettingsDialogState extends State<_ViewerSettingsDialog> {
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
     return AlertDialog(
-      title: const Text('pdfإعدادات عارض ال'),
+      title: const Text('إعدادات عارض الPDF'),
       content: SizedBox(
         width: 520, 
         child: SingleChildScrollView(
@@ -76,18 +76,20 @@ class _ViewerSettingsDialogState extends State<_ViewerSettingsDialog> {
             children: [
               _kindTile(ViewerKind.sumatra, 'SumatraPDF (موصى به)'),
               if (_kind == ViewerKind.sumatra)
-                _pathRow(_sumatraCtrl, hint: r'مثال: C:\Program Files\SumatraPDF\SumatraPDF.exe'),
-              _kindTile(ViewerKind.foxit, 'Foxit Reader'),
+                _pathRow(_sumatraCtrl, hint: r'لتحديد مسار خاص أدخل مسار ملف SumatraPDF.exe'),
+              _kindTile(ViewerKind.foxit, 'Foxit Reader / Editor'),
               if (_kind == ViewerKind.foxit)
                 _pathRow(_foxitCtrl,
-                    hint: r'مثال: C:\Program Files\Foxit Software\Foxit PDF Reader\FoxitPDFReader.exe'),
+                    hint: r'لتحديد مسار خاص أدخل مسار ملف FoxitPDFEditor.exe أو نحوه'),
               _kindTile(ViewerKind.chrome, 'Chrome'),
               if (_kind == ViewerKind.chrome)
                 _pathRow(_chromeCtrl,
-                    hint: r'مثال: C:\Program Files\Google\Chrome\Application\chrome.exe'),
+                    hint: r'لتحديد مسار خاص أدخل مسار ملف chrome.exe'),
               const SizedBox(height: 8),
               Text(
-                'إن لم يُعثر على البرنامج، سيُفتح الملف في المتصفح الافتراضي بدلًا منه.',
+                _kind == ViewerKind.sumatra && Viewer.noExplicitPreference
+                    ? 'إن لم يُعثر على SumatraPDF، ستتم تجربة Foxit Reader/Editor ثم Chrome قبل الرجوع إلى المتصفح الافتراضي.'
+                    : 'إن لم يُعثر على البرنامج، سيُفتح الملف في المتصفح الافتراضي بدلًا منه.',
                 style: TextStyle(color: cs.onSurfaceVariant, fontSize: 12.5),
               ),
               const SizedBox(height: 4),

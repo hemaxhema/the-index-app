@@ -20,6 +20,18 @@ flutter build windows --release # -> build\windows\x64\runner\Release\bookmark_i
 2. It scans (in a background isolate), groups the bookmarks, and caches the
    result. Use **refresh** to rescan after adding books.
 
+### Running from cmd with a search word
+
+Pass a word (or phrase) as a command-line argument and the app opens with it
+already typed into the search box and the list filtered:
+
+```powershell
+bookmark_index.exe نصب
+```
+
+It still reopens the last folder as usual (the cache load happens
+automatically), so the filter takes effect as soon as the index loads.
+
 ## Keyboard shortcuts
 
 In-app: click the **?** icon in the toolbar (or press `F1`) for the full list.
@@ -45,7 +57,8 @@ In-app: click the **?** icon in the toolbar (or press `F1`) for the full list.
   punctuation, collapse whitespace. Titles with the same normalized key are
   grouped into one `Topic`. Cross-book topics are listed first.
 - **Viewer** — supports **SumatraPDF** (`-reuse-instance -page N`), **Foxit
-  Reader** (`/A page=N`), or **Chrome** (`file://…#page=N`, opened in the
+  Reader/Editor** (`/A page=N` — also detects Foxit PDF Editor/PhantomPDF
+  installs, which share the same switch), or **Chrome** (`file://…#page=N`, opened in the
   user's normal browsing window — a new tab each time, since Chrome doesn't
   allow reusing a tab from the command line). Defaults to SumatraPDF. Falls
   back to the default browser via `file://…#page=N` if the chosen viewer

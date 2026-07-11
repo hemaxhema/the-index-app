@@ -4,7 +4,10 @@ import 'package:ffi/ffi.dart';
 import 'package:win32/win32.dart';
 
 /// HRESULT for a cancelled common dialog: HRESULT_FROM_WIN32(ERROR_CANCELLED).
-const int _cancelled = 0x800704C7;
+/// Derived via HRESULT.fromWin32 (not a hardcoded literal) because HRESULT is
+/// a signed 32-bit value and a raw positive hex literal never equals the
+/// negative value WindowsException.hr actually carries.
+final HRESULT _cancelled = HRESULT.fromWin32(ERROR_CANCELLED);
 
 /// Shows the modern native Windows folder picker (IFileOpenDialog, the
 /// Explorer-style dialog).

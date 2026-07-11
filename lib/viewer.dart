@@ -17,7 +17,7 @@ ViewerKind _parseKind(String? raw) {
 /// Opens a PDF at a specific page in an external viewer, or an HTML file in
 /// the default browser.
 ///
-/// Supports SumatraPDF (`-reuse-instance -page N`), Foxit Reader
+/// Supports SumatraPDF (`-reuse-instance -page N`), Foxit Reader/Editor
 /// (`<file> /A page=N`), or Chrome (`file:///<path>#page=N`). If the chosen
 /// viewer's executable can't be found, falls back to opening the file URL
 /// with `#page=N` in the default browser (Edge/Chrome honor the fragment).
@@ -32,6 +32,10 @@ class Viewer {
     r'C:\Program Files (x86)\Foxit Software\Foxit PDF Reader\FoxitPDFReader.exe',
     r'C:\Program Files\Foxit Software\Foxit Reader\FoxitReader.exe',
     r'C:\Program Files (x86)\Foxit Software\Foxit Reader\FoxitReader.exe',
+    r'C:\Program Files\Foxit Software\Foxit PDF Editor\FoxitPDFEditor.exe',
+    r'C:\Program Files (x86)\Foxit Software\Foxit PDF Editor\FoxitPDFEditor.exe',
+    r'C:\Program Files\Foxit Software\Foxit PhantomPDF\FoxitPhantomPDF.exe',
+    r'C:\Program Files (x86)\Foxit Software\Foxit PhantomPDF\FoxitPhantomPDF.exe',
   ];
 
   static const _chromeCandidates = [
@@ -40,6 +44,13 @@ class Viewer {
   ];
 
   static ViewerKind get kind => _parseKind(Store.instance.viewerKind);
+
+  /// Whether the user has never explicitly saved a viewer preference (fresh
+  /// install / never opened the settings dialog). Only in this state does
+  /// the Sumatra path cascade through Foxit then Chrome before the browser;
+  /// once the user explicitly picks Sumatra in settings, it is honored as
+  /// a single choice like Foxit/Chrome are.
+  static bool get noExplicitPreference => Store.instance.viewerKind == null;
 
   /// Returns the SumatraPDF path to use, or null if none found.
   static String? findSumatra() {
@@ -58,7 +69,7 @@ class Viewer {
     return null;
   }
 
-  /// Returns the Foxit Reader path to use, or null if none found.
+  /// Returns the Foxit Reader/Editor path to use, or null if none found.
   static String? findFoxit() {
     final configured = Store.instance.foxitPath;
     if (configured != null && configured.isNotEmpty && File(configured).existsSync()) {
@@ -99,13 +110,17 @@ class Viewer {
   static String _describeBackend() {
     switch (kind) {
       case ViewerKind.sumatra:
-        return findSumatra() != null
-            ? 'SumatraPDF'
-            : 'SumatraPDF (غير موجود، سيُستخدم المتصفح)';
+        if (findSumatra() != null) return 'SumatraPDF';
+        if (noExplicitPreference) {
+          if (findFoxit() != null) return 'Foxit Reader/Editor (SumatraPDF غير موجود)';
+          if (findChrome() != null) return 'Chrome (SumatraPDF وFoxit غير موجودين)';
+          return 'المتصفح الافتراضي (لم يُعثر على أي عارض)';
+        }
+        return 'SumatraPDF (غير موجود، سيُستخدم المتصفح)';
       case ViewerKind.foxit:
         return findFoxit() != null
-            ? 'Foxit Reader'
-            : 'Foxit Reader (غير موجود، سيُستخدم المتصفح)';
+            ? 'Foxit Reader/Editor'
+            : 'Foxit Reader/Editor (غير موجود، سيُستخدم المتصفح)';
       case ViewerKind.chrome:
         return findChrome() != null
             ? 'Chrome'
@@ -136,6 +151,12 @@ class Viewer {
       case ViewerKind.sumatra:
         final sumatra = findSumatra();
         if (sumatra != null) return _launchSumatra(sumatra, pdfPath, safePage);
+        if (noExplicitPreference) {
+          final foxit = findFoxit();
+          if (foxit != null) return _launchFoxit(foxit, pdfPath, safePage);
+          final chrome = findChrome();
+          if (chrome != null) return _launchChrome(chrome, pdfPath, safePage);
+        }
         return _openInBrowser(pdfPath, safePage);
       case ViewerKind.foxit:
         final foxit = findFoxit();
@@ -156,6 +177,8 @@ class Viewer {
     );
   }
 
+  /// Also works for Foxit PDF Editor / PhantomPDF, which share Foxit
+  /// Reader's `/A page=N` command-line switch.
   static Future<void> _launchFoxit(String exe, String pdfPath, int page) async {
     await Process.start(
       exe,
@@ -180,6 +203,19 @@ class Viewer {
       ['/c', 'start', 'msedge', url],
       mode: ProcessStartMode.detached,
       runInShell: true,
+    );
+  }
+
+  /// Opens an arbitrary web URL in the user's default browser.
+  ///
+  /// Uses rundll32's URL handler instead of `cmd /c start`: cmd.exe owns a
+  /// console window that flashes on screen for an instant even when detached,
+  /// while rundll32 has no console to flash.
+  static Future<void> openUrl(String url) async {
+    await Process.start(
+      'rundll32',
+      ['url.dll,FileProtocolHandler', url],
+      mode: ProcessStartMode.detached,
     );
   }
 }

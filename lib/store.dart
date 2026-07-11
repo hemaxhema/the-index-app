@@ -86,7 +86,7 @@ class Store {
     _writeSettings(s);
   }
 
-  /// Explicit Foxit Reader executable path (optional; auto-detected otherwise).
+  /// Explicit Foxit Reader/Editor executable path (optional; auto-detected otherwise).
   String? get foxitPath => _readSettings()['foxitPath'] as String?;
   set foxitPath(String? v) {
     final s = _readSettings()..['foxitPath'] = v;
@@ -97,6 +97,14 @@ class Store {
   String? get chromePath => _readSettings()['chromePath'] as String?;
   set chromePath(String? v) {
     final s = _readSettings()..['chromePath'] = v;
+    _writeSettings(s);
+  }
+
+  /// Whether the app has completed its first launch (used to show the
+  /// one-time "install a PDF viewer" prompt only once).
+  bool get firstRunDone => _readSettings()['firstRunDone'] == true;
+  set firstRunDone(bool v) {
+    final s = _readSettings()..['firstRunDone'] = v;
     _writeSettings(s);
   }
 

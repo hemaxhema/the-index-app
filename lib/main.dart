@@ -4,23 +4,31 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 
+import 'about_dialog.dart';
 import 'dictionary_mode.dart' show dictionaryRootForm;
 import 'models.dart';
 import 'normalize.dart';
 import 'scanner.dart';
 import 'store.dart';
 import 'viewer.dart';
+import 'viewer_install_prompt.dart';
 import 'folder_picker.dart';
 import 'theme/app_theme.dart';
 import 'viewer_settings.dart';
 
-void main() => runApp(const BookmarkIndexApp());
+// Lets the released .exe be launched from cmd with a search word already
+// filled in, e.g. `bookmark_index.exe نصب`, instead of requiring the user to
+// type it after the window opens.
+void main(List<String> args) =>
+    runApp(BookmarkIndexApp(initialQuery: args.isEmpty ? null : args.join(' ')));
 
 /// Global day/night toggle. Day (light) mode is the normal/default mode.
 final ValueNotifier<ThemeMode> appThemeMode = ValueNotifier(ThemeMode.light);
 
 class BookmarkIndexApp extends StatelessWidget {
-  const BookmarkIndexApp({super.key});
+  const BookmarkIndexApp({super.key, this.initialQuery});
+
+  final String? initialQuery;
 
   @override
   Widget build(BuildContext context) {
@@ -33,10 +41,13 @@ class BookmarkIndexApp extends StatelessWidget {
           theme: AppTheme.day,
           darkTheme: AppTheme.night,
           themeMode: mode,
-          home: const Directionality(
+          // Wraps the Navigator itself (not just `home`), so every dialog
+          // pushed via showDialog(context: ...) inherits RTL too.
+          builder: (context, child) => Directionality(
             textDirection: TextDirection.rtl,
-            child: HomePage(),
+            child: child!,
           ),
+          home: HomePage(initialQuery: initialQuery),
         );
       },
     );
@@ -44,7 +55,9 @@ class BookmarkIndexApp extends StatelessWidget {
 }
 
 class HomePage extends StatefulWidget {
-  const HomePage({super.key});
+  const HomePage({super.key, this.initialQuery});
+
+  final String? initialQuery;
 
   @override
   State<HomePage> createState() => _HomePageState();
@@ -81,24 +94,43 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   String? _status;
   int _selected = 0;
 
+  // Number of dialog/route-based pickers currently open (showDialog and the
+  // native-fallback in-app folder picker). While > 0, _onHardwareKey defers
+  // to whatever's on top instead of also acting on the main list underneath.
+  int _dialogDepth = 0;
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _searchFocus = FocusNode(debugLabel: 'search', onKeyEvent: _onSearchKey);
+    if (widget.initialQuery != null) {
+      _searchCtrl.value = TextEditingValue(
+        text: widget.initialQuery!,
+        selection: TextSelection.collapsed(offset: widget.initialQuery!.length),
+      );
+    }
     _searchCtrl.addListener(_onSearchChanged);
+    // Global shortcuts/navigation (see _onHardwareKey) fire on every hardware
+    // key event regardless of Flutter's internal focus tree, so they work
+    // even right after the external PDF viewer or a dialog took focus away.
+    HardwareKeyboard.instance.addHandler(_onHardwareKey);
     // Defer to after the first frame so the initial setState calls in
     // _bootstrap/_applyFilter don't run during initState. Also explicitly grab
     // keyboard focus (autofocus alone is unreliable on Windows at startup).
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _searchFocus.requestFocus();
       _bootstrap();
+      if (mounted) {
+        _trackDialog(() => showViewerInstallPromptIfNeeded(context));
+      }
     });
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    HardwareKeyboard.instance.removeHandler(_onHardwareKey);
     _filterDebounce?.cancel();
     _searchCtrl.dispose();
     _searchFocus.dispose();
@@ -109,10 +141,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   // Opening a book launches the external PDF viewer (see Viewer.open), which
   // takes OS-level window focus away from this app; on Windows that clears
-  // Flutter's internal focus entirely, so CallbackShortcuts has nothing to
-  // bubble key events through until something reclaims it (see
-  // _reclaimFocus). Do that as soon as this window becomes active again,
-  // instead of requiring an extra throwaway click first.
+  // Flutter's internal focus entirely. Keyboard shortcuts survive that fine
+  // now (see _onHardwareKey), but the search box's own focus/cursor state
+  // doesn't reclaim itself, so do that as soon as this window becomes
+  // active again, instead of requiring a throwaway click first.
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) _reclaimFocus();
@@ -139,9 +171,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   Future<void> _chooseFolder() async {
-    final picked = await pickFolder(
-      context,
-      initial: _index?.folder ?? Store.instance.lastFolder,
+    final picked = await _trackDialog(
+      () => pickFolder(
+        context,
+        initial: _index?.folder ?? Store.instance.lastFolder,
+      ),
     );
     _reclaimFocus();
     if (!mounted || picked == null) return;
@@ -175,8 +209,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     // has no prior state to preserve.
     final samefolder = _index != null && _index!.folder == folder;
     final previousOrder = samefolder ? _index!.folderOrder : const <String>[];
-    final previousDisabled = samefolder ? _index!.disabledFolders : const <String>{};
-    final previousDictOverride = samefolder ? _index!.dictionaryModeOverride : null;
+    final previousDisabled = samefolder
+        ? _index!.disabledFolders
+        : const <String>{};
+    final previousDictOverride = samefolder
+        ? _index!.dictionaryModeOverride
+        : null;
     setState(() {
       _loading = true;
       _status = 'يفحص ملفات PDF…';
@@ -227,71 +265,86 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   /// directly in the app bar (rescan, folder order, dictionary mode,
   /// auto-refresh, editing, PDF viewer settings, help) into one place.
   Future<void> _showOptionsDialog() async {
-    await showDialog<void>(
-      context: context,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setDialogState) => AlertDialog(
-          title: const Text('خيارات'),
-          content: SizedBox(
-            width: 420,
-            child: SingleChildScrollView(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  ListTile(
-                    leading: const Icon(Icons.refresh),
-                    title: const Text('إعادة الفحص'),
-                    enabled: !_loading && _index != null,
-                    onTap: () {
-                      Navigator.pop(ctx);
-                      _scan(_index!.folder);
-                    },
-                  ),
-                  ListTile(
-                    leading: const Icon(Icons.sort),
-                    title: const Text('ترتيب المجلدات'),
-                    enabled: !_loading && _index != null,
-                    onTap: () {
-                      Navigator.pop(ctx);
-                      _showFolderOrderDialog();
-                    },
-                  ),
-                  SwitchListTile(
-                    secondary: Icon(
-                      (_index?.dictionaryMode ?? false) ? Icons.auto_stories : Icons.auto_stories_outlined,
+    await _trackDialog(
+      () => showDialog<void>(
+        context: context,
+        builder: (ctx) => StatefulBuilder(
+          builder: (ctx, setDialogState) => AlertDialog(
+            title: const Text('خيارات'),
+            content: SizedBox(
+              width: 420,
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    ListTile(
+                      leading: const Icon(Icons.refresh),
+                      title: const Text('إعادة الفحص'),
+                      enabled: !_loading && _index != null,
+                      onTap: () {
+                        Navigator.pop(ctx);
+                        _scan(_index!.folder);
+                      },
                     ),
-                    title: const Text('وضع القاموس (تجميع حسب الجذر)'),
-                    value: _index?.dictionaryMode ?? false,
-                    onChanged: _index == null
-                        ? null
-                        : (_) {
-                            _toggleDictionaryMode();
-                            setDialogState(() {});
-                          },
-                  ),
-                  ListTile(
-                    leading: const Icon(Icons.picture_as_pdf_outlined),
-                    title: const Text('pdfإعدادات عارض ال'),
-                    onTap: () {
-                      Navigator.pop(ctx);
-                      _showViewerSettings();
-                    },
-                  ),
-                  ListTile(
-                    leading: const Icon(Icons.help_outline),
-                    title: const Text('مساعدة واختصارات لوحة المفاتيح (F1)'),
-                    onTap: () {
-                      Navigator.pop(ctx);
-                      _showHelpDialog();
-                    },
-                  ),
-                ],
+                    ListTile(
+                      leading: const Icon(Icons.sort),
+                      title: const Text('ترتيب الملفات'),
+                      enabled: !_loading && _index != null,
+                      onTap: () {
+                        Navigator.pop(ctx);
+                        _showFolderOrderDialog();
+                      },
+                    ),
+                    SwitchListTile(
+                      secondary: Icon(
+                        (_index?.dictionaryMode ?? false)
+                            ? Icons.auto_stories
+                            : Icons.auto_stories_outlined,
+                      ),
+                      title: const Text('وضع القاموس (تجميع حسب الجذر)'),
+                      value: _index?.dictionaryMode ?? false,
+                      onChanged: _index == null
+                          ? null
+                          : (_) {
+                              _toggleDictionaryMode();
+                              setDialogState(() {});
+                            },
+                    ),
+                    ListTile(
+                      leading: const Icon(Icons.picture_as_pdf_outlined),
+                      title: const Text('إعدادات عارض الPDF'),
+                      onTap: () {
+                        Navigator.pop(ctx);
+                        _showViewerSettings();
+                      },
+                    ),
+                    ListTile(
+                      leading: const Icon(Icons.help_outline),
+                      title: const Text('مساعدة واختصارات لوحة المفاتيح (F1)'),
+                      onTap: () {
+                        Navigator.pop(ctx);
+                        _showHelpDialog();
+                      },
+                    ),
+                    ListTile(
+                      leading: const Icon(Icons.info_outline),
+                      title: const Text('حول البرنامج'),
+                      onTap: () {
+                        Navigator.pop(ctx);
+                        _showAboutDialog();
+                      },
+                    ),
+                  ],
+                ),
               ),
             ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('إغلاق'),
+              ),
+            ],
           ),
-          actions: [
-            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('إغلاق')),
-          ],
         ),
       ),
     );
@@ -302,55 +355,68 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   /// for it, and prune entries from that list.
   Future<void> _showSwitchFolderDialog() async {
     final folders = Store.instance.savedFolders;
-    await showDialog<void>(
-      context: context,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setDialogState) => AlertDialog(
-          title: const Text('التبديل بين المجلدات'),
-          content: SizedBox(
-            width: 460,
-            height: 420,
-            child: folders.isEmpty
-                ? const Center(child: Text('لا توجد مجلدات محفوظة بعد'))
-                : ListView.builder(
-                    itemCount: folders.length,
-                    itemBuilder: (c, i) {
-                      final f = folders[i];
-                      final isCurrent = _index?.folder == f;
-                      final cs = Theme.of(ctx).colorScheme;
-                      return ListTile(
-                        leading: Icon(
-                          isCurrent ? Icons.folder_open : Icons.folder,
-                          color: isCurrent ? cs.primary : null,
-                        ),
-                        title: Text(p.basename(f),
-                            maxLines: 1, overflow: TextOverflow.ellipsis),
-                        subtitle: Text(f,
+    await _trackDialog(
+      () => showDialog<void>(
+        context: context,
+        builder: (ctx) => StatefulBuilder(
+          builder: (ctx, setDialogState) => AlertDialog(
+            title: const Text('التبديل بين المجلدات'),
+            content: SizedBox(
+              width: 460,
+              height: 420,
+              child: folders.isEmpty
+                  ? const Center(child: Text('لا توجد مجلدات محفوظة بعد'))
+                  : ListView.builder(
+                      itemCount: folders.length,
+                      itemBuilder: (c, i) {
+                        final f = folders[i];
+                        final isCurrent = _index?.folder == f;
+                        final cs = Theme.of(ctx).colorScheme;
+                        return ListTile(
+                          leading: Icon(
+                            isCurrent ? Icons.folder_open : Icons.folder,
+                            color: isCurrent ? cs.primary : null,
+                          ),
+                          title: Text(
+                            p.basename(f),
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
-                            style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant)),
-                        selected: isCurrent,
-                        trailing: IconButton(
-                          tooltip: 'إزالة من القائمة',
-                          icon: const Icon(Icons.close, size: 18),
-                          onPressed: () {
-                            Store.instance.removeSavedFolder(f);
-                            setDialogState(() => folders.removeAt(i));
-                          },
-                        ),
-                        onTap: isCurrent
-                            ? null
-                            : () {
-                                Navigator.pop(ctx);
-                                _switchToFolder(f);
-                              },
-                      );
-                    },
-                  ),
+                          ),
+                          subtitle: Text(
+                            f,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontSize: 11,
+                              color: cs.onSurfaceVariant,
+                            ),
+                          ),
+                          selected: isCurrent,
+                          trailing: IconButton(
+                            tooltip: 'إزالة من القائمة',
+                            icon: const Icon(Icons.close, size: 18),
+                            onPressed: () {
+                              Store.instance.removeSavedFolder(f);
+                              setDialogState(() => folders.removeAt(i));
+                            },
+                          ),
+                          onTap: isCurrent
+                              ? null
+                              : () {
+                                  Navigator.pop(ctx);
+                                  _switchToFolder(f);
+                                },
+                        );
+                      },
+                    ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('إغلاق'),
+              ),
+            ],
           ),
-          actions: [
-            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('إغلاق')),
-          ],
         ),
       ),
     );
@@ -365,11 +431,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final folders = Store.instance.savedFolders;
     if (folders.length < 2) return;
     final currentIdx = folders.indexWhere(
-        (f) => f.toLowerCase() == (_index?.folder ?? '').toLowerCase());
+      (f) => f.toLowerCase() == (_index?.folder ?? '').toLowerCase(),
+    );
     final startIndex = (currentIdx < 0 ? 0 : currentIdx + 1) % folders.length;
-    final result = await showDialog<String>(
-      context: context,
-      builder: (_) => _FolderSwitcherDialog(folders: folders, startIndex: startIndex),
+    final result = await _trackDialog(
+      () => showDialog<String>(
+        context: context,
+        builder: (_) =>
+            _FolderSwitcherDialog(folders: folders, startIndex: startIndex),
+      ),
     );
     _reclaimFocus();
     if (!mounted || result == null) return;
@@ -379,78 +449,89 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Future<void> _showFolderOrderDialog() async {
     final order = _orderedFolderNames();
     final disabled = Set<String>.of(_index!.disabledFolders);
-    final saved = await showDialog<(List<String>, Set<String>)>(
-      context: context,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setDialogState) => AlertDialog(
-          title: const Text('ترتيب المجلدات'),
-          content: SizedBox(
-            width: 420,
-            height: 480,
-            child: ReorderableListView.builder(
-              buildDefaultDragHandles: false,
-              itemCount: order.length,
-              itemBuilder: (c, i) {
-                final name = order[i];
-                final isOn = !disabled.contains(name.toLowerCase());
-                return ListTile(
-                  key: ValueKey(name),
-                  leading: Checkbox(
-                    value: isOn,
-                    onChanged: (v) => setDialogState(() {
-                      if (v ?? true) {
-                        disabled.remove(name.toLowerCase());
-                      } else {
-                        disabled.add(name.toLowerCase());
-                      }
-                    }),
-                  ),
-                  title: Text(
-                    name,
-                    style: isOn
-                        ? null
-                        : TextStyle(color: Theme.of(ctx).colorScheme.onSurfaceVariant),
-                  ),
-                  trailing: ReorderableDragStartListener(
-                    index: i,
-                    child: const Icon(Icons.drag_indicator),
-                  ),
-                );
-              },
-              onReorder: (oldIndex, newIndex) => setDialogState(() {
-                if (newIndex > oldIndex) newIndex -= 1;
-                final item = order.removeAt(oldIndex);
-                order.insert(newIndex, item);
-              }),
+    final saved = await _trackDialog(
+      () => showDialog<(List<String>, Set<String>)>(
+        context: context,
+        builder: (ctx) => StatefulBuilder(
+          builder: (ctx, setDialogState) => AlertDialog(
+            title: const Text('ترتيب الملفات'),
+            content: SizedBox(
+              width: 420,
+              height: 480,
+              child: ReorderableListView.builder(
+                buildDefaultDragHandles: false,
+                itemCount: order.length,
+                itemBuilder: (c, i) {
+                  final name = order[i];
+                  final isOn = !disabled.contains(name.toLowerCase());
+                  return ListTile(
+                    key: ValueKey(name),
+                    leading: Checkbox(
+                      value: isOn,
+                      onChanged: (v) => setDialogState(() {
+                        if (v ?? true) {
+                          disabled.remove(name.toLowerCase());
+                        } else {
+                          disabled.add(name.toLowerCase());
+                        }
+                      }),
+                    ),
+                    title: Text(
+                      name,
+                      style: isOn
+                          ? null
+                          : TextStyle(
+                              color: Theme.of(ctx).colorScheme.onSurfaceVariant,
+                            ),
+                    ),
+                    trailing: ReorderableDragStartListener(
+                      index: i,
+                      child: const Icon(Icons.drag_indicator),
+                    ),
+                  );
+                },
+                onReorder: (oldIndex, newIndex) => setDialogState(() {
+                  if (newIndex > oldIndex) newIndex -= 1;
+                  final item = order.removeAt(oldIndex);
+                  order.insert(newIndex, item);
+                }),
+              ),
             ),
+            actions: [
+              TextButton(
+                onPressed: () => setDialogState(() => disabled.clear()),
+                child: const Text('تحديد الكل'),
+              ),
+              TextButton(
+                onPressed: () => setDialogState(() {
+                  disabled
+                    ..clear()
+                    ..addAll(order.map((n) => n.toLowerCase()));
+                }),
+                child: const Text('إلغاء تحديد الكل'),
+              ),
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('إلغاء'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(ctx, (order, disabled)),
+                child: const Text('حفظ'),
+              ),
+            ],
           ),
-          actions: [
-            TextButton(
-              onPressed: () => setDialogState(() => disabled.clear()),
-              child: const Text('تحديد الكل'),
-            ),
-            TextButton(
-              onPressed: () => setDialogState(() {
-                disabled
-                  ..clear()
-                  ..addAll(order.map((n) => n.toLowerCase()));
-              }),
-              child: const Text('إلغاء تحديد الكل'),
-            ),
-            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('إلغاء')),
-            FilledButton(
-              onPressed: () => Navigator.pop(ctx, (order, disabled)),
-              child: const Text('حفظ'),
-            ),
-          ],
         ),
       ),
     );
     _reclaimFocus();
     if (!mounted || saved == null) return;
     final (newOrder, newDisabled) = saved;
-    setState(() => _index = _index!.reordered(newOrder, disabledFolders: newDisabled));
-    Store.instance.saveCache(_index!); // persists the order with this folder's cache
+    setState(
+      () => _index = _index!.reordered(newOrder, disabledFolders: newDisabled),
+    );
+    Store.instance.saveCache(
+      _index!,
+    ); // persists the order with this folder's cache
     _applyFilter();
   }
 
@@ -458,7 +539,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final idx = _index;
     if (idx == null) return;
     setState(() => _index = idx.withDictionaryMode(!idx.dictionaryMode));
-    Store.instance.saveCache(_index!); // persists the override with this folder's cache
+    Store.instance.saveCache(
+      _index!,
+    ); // persists the override with this folder's cache
     _applyFilter();
   }
 
@@ -473,9 +556,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       // through that same dictionaryRootForm step before normalizeTitle, or a
       // full surface spelling (e.g. "عضعض") would never match its collapsed
       // root key (e.g. "عضض").
-      final q = normalizeTitle(idx.dictionaryMode
-          ? dictionaryRootForm(_searchCtrl.text)
-          : _searchCtrl.text);
+      final q = normalizeTitle(
+        idx.dictionaryMode
+            ? dictionaryRootForm(_searchCtrl.text)
+            : _searchCtrl.text,
+      );
       if (q.isEmpty) {
         res = idx.topics;
       } else {
@@ -504,12 +589,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   // ---- keyboard ----
 
-  Topic? get _current =>
-      (_selected >= 0 && _selected < _filtered.length) ? _filtered[_selected] : null;
+  Topic? get _current => (_selected >= 0 && _selected < _filtered.length)
+      ? _filtered[_selected]
+      : null;
 
   void _move(int delta) {
     if (_filtered.isEmpty) return;
-    setState(() => _selected = (_selected + delta).clamp(0, _filtered.length - 1));
+    setState(
+      () => _selected = (_selected + delta).clamp(0, _filtered.length - 1),
+    );
     _ensureVisible();
   }
 
@@ -518,7 +606,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final pos = _scrollCtrl.position;
     // Rows are a fixed [_rowHeight], so the selected row's offset is exact —
     // no need to find its built widget. Center it in the viewport.
-    final target = _selected * _rowHeight - (pos.viewportDimension - _rowHeight) / 2;
+    final target =
+        _selected * _rowHeight - (pos.viewportDimension - _rowHeight) / 2;
     _scrollCtrl.animateTo(
       target.clamp(0.0, pos.maxScrollExtent),
       duration: const Duration(milliseconds: 120),
@@ -559,45 +648,71 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   void _focusSearch() {
     _searchFocus.requestFocus();
-    _searchCtrl.selection =
-        TextSelection(baseOffset: 0, extentOffset: _searchCtrl.text.length);
+    _searchCtrl.selection = TextSelection(
+      baseOffset: 0,
+      extentOffset: _searchCtrl.text.length,
+    );
   }
 
-  /// Dialogs/menus (showDialog/showMenu) are routes outside the
-  /// CallbackShortcuts subtree in build(), so nothing here holds focus while
-  /// they're open. Call this right after such a route closes so global
-  /// shortcuts (Ctrl+F, F1, ...) and list navigation keep working instead of
-  /// going dead until the next click.
+  /// Dialogs/menus (showDialog/showMenu) are routes outside this subtree in
+  /// build(), so nothing here holds focus while they're open. Call this
+  /// right after such a route closes to restore the search box's visual
+  /// focus/cursor state (keyboard shortcuts no longer depend on this — see
+  /// [_onHardwareKey] — but the TextField still needs something focused to
+  /// look and behave right).
   void _reclaimFocus() {
     if (!mounted) return;
     if (!_searchFocus.hasFocus && !_rootFocus.hasFocus) _searchFocus.requestFocus();
+  }
+
+  /// Wraps a showDialog (or similar route-pushing) call so [_onHardwareKey]
+  /// knows a modal is on top and defers to it instead of also acting on the
+  /// main list underneath.
+  Future<T?> _trackDialog<T>(Future<T?> Function() show) async {
+    _dialogDepth++;
+    try {
+      return await show();
+    } finally {
+      _dialogDepth--;
+    }
   }
 
   /// Global shortcuts (work even while the search box is focused):
   /// Ctrl+F focuses search; Ctrl+1..9 opens the selected topic's Nth book;
   /// Ctrl+E opens the "all books" dialog for the selected topic; F1 opens the
   /// help dialog.
-  /// Uses SingleActivator (via CallbackShortcuts) for reliable matching.
+  /// Matched against raw key events in [_onHardwareKey] via
+  /// [ShortcutActivator.accepts].
   Map<ShortcutActivator, VoidCallback> _globalShortcuts() {
     const topRow = [
-      LogicalKeyboardKey.digit1, LogicalKeyboardKey.digit2,
-      LogicalKeyboardKey.digit3, LogicalKeyboardKey.digit4,
-      LogicalKeyboardKey.digit5, LogicalKeyboardKey.digit6,
-      LogicalKeyboardKey.digit7, LogicalKeyboardKey.digit8,
+      LogicalKeyboardKey.digit1,
+      LogicalKeyboardKey.digit2,
+      LogicalKeyboardKey.digit3,
+      LogicalKeyboardKey.digit4,
+      LogicalKeyboardKey.digit5,
+      LogicalKeyboardKey.digit6,
+      LogicalKeyboardKey.digit7,
+      LogicalKeyboardKey.digit8,
       LogicalKeyboardKey.digit9,
     ];
     const numpad = [
-      LogicalKeyboardKey.numpad1, LogicalKeyboardKey.numpad2,
-      LogicalKeyboardKey.numpad3, LogicalKeyboardKey.numpad4,
-      LogicalKeyboardKey.numpad5, LogicalKeyboardKey.numpad6,
-      LogicalKeyboardKey.numpad7, LogicalKeyboardKey.numpad8,
+      LogicalKeyboardKey.numpad1,
+      LogicalKeyboardKey.numpad2,
+      LogicalKeyboardKey.numpad3,
+      LogicalKeyboardKey.numpad4,
+      LogicalKeyboardKey.numpad5,
+      LogicalKeyboardKey.numpad6,
+      LogicalKeyboardKey.numpad7,
+      LogicalKeyboardKey.numpad8,
       LogicalKeyboardKey.numpad9,
     ];
     final bindings = <ShortcutActivator, VoidCallback>{
-      const SingleActivator(LogicalKeyboardKey.keyF, control: true): _focusSearch,
+      const SingleActivator(LogicalKeyboardKey.keyF, control: true):
+          _focusSearch,
       const SingleActivator(LogicalKeyboardKey.keyE, control: true):
           _openAllBooksForCurrent,
-      const SingleActivator(LogicalKeyboardKey.keyR, control: true): _openFolderSwitcher,
+      const SingleActivator(LogicalKeyboardKey.keyR, control: true):
+          _openFolderSwitcher,
       const SingleActivator(LogicalKeyboardKey.f1): _showHelpDialog,
     };
     for (var i = 0; i < 9; i++) {
@@ -632,27 +747,47 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     return KeyEventResult.ignored; // let text input through
   }
 
-  KeyEventResult _onRootKey(FocusNode node, KeyEvent e) {
-    if (e is! KeyDownEvent && e is! KeyRepeatEvent) return KeyEventResult.ignored;
-    if (_searchFocus.hasFocus) return KeyEventResult.ignored;
-    final k = e.logicalKey;
+  /// Fires on every hardware key event the OS delivers to this window,
+  /// independent of Flutter's internal focus tree — unlike CallbackShortcuts
+  /// / Focus.onKeyEvent, which need *something* in the app to hold focus to
+  /// bubble through. That requirement broke shortcuts right after the
+  /// external PDF viewer or a dialog took focus away, until an extra click
+  /// (sometimes two — Windows can consume the first click on an inactive
+  /// window just to activate it) re-requested focus. This handler needs
+  /// none of that.
+  ///
+  /// Owns the global Ctrl+/F1 shortcuts ([_globalShortcuts]) plus root-level
+  /// list navigation (arrows/`/`/Escape) whenever the search box isn't
+  /// focused — [_onSearchKey] (tied to the search TextField's own focus
+  /// node) remains the sole owner of arrows/Enter/Escape while typing.
+  bool _onHardwareKey(KeyEvent event) {
+    if (event is! KeyDownEvent && event is! KeyRepeatEvent) return false;
+    if (_dialogDepth > 0) return false; // an open dialog owns its own keys
+    for (final entry in _globalShortcuts().entries) {
+      if (entry.key.accepts(event, HardwareKeyboard.instance)) {
+        entry.value();
+        return true;
+      }
+    }
+    if (_searchFocus.hasFocus) return false;
+    final k = event.logicalKey;
     if (k == LogicalKeyboardKey.arrowDown) {
       _move(1);
-      return KeyEventResult.handled;
+      return true;
     }
     if (k == LogicalKeyboardKey.arrowUp) {
       _move(-1);
-      return KeyEventResult.handled;
+      return true;
     }
     if (k == LogicalKeyboardKey.slash) {
       _focusSearch();
-      return KeyEventResult.handled;
+      return true;
     }
     if (k == LogicalKeyboardKey.escape) {
       _rootFocus.requestFocus();
-      return KeyEventResult.handled;
+      return true;
     }
-    return KeyEventResult.ignored;
+    return false;
   }
 
   // ---- UI ----
@@ -660,84 +795,86 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
-    return CallbackShortcuts(
-      bindings: _globalShortcuts(),
-      child: Listener(
-        behavior: HitTestBehavior.translucent,
-        // If the app subtree holds no focus (e.g. after returning from the PDF
-        // viewer or the folder dialog), any click re-grabs it so shortcuts and
-        // arrow keys work again without needing to click the search box.
-        onPointerDown: (_) {
-          if (!_rootFocus.hasFocus) _rootFocus.requestFocus();
-        },
-        child: Focus(
-          focusNode: _rootFocus,
-          onKeyEvent: _onRootKey,
-          child: Scaffold(
-        appBar: AppBar(
-          title: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Text(
-                'فهرس الفهارس',
-                style: TextStyle(fontFamily: 'Typokar'),
-              ),
-              if (_index != null) ...[
-                const SizedBox(width: 8),
-                Text(
-                  '- ${p.basename(_index!.folder)}',
-                  style: Theme.of(context)
-                      .textTheme
-                      .titleLarge
-                      ,
-                  overflow: TextOverflow.ellipsis,
+    return Listener(
+      behavior: HitTestBehavior.translucent,
+      // If the app subtree holds no focus (e.g. after returning from the PDF
+      // viewer or a dialog), any click re-grabs it so the search box's
+      // visual focus/cursor state stays sane (keyboard shortcuts themselves
+      // no longer need this — see _onHardwareKey).
+      onPointerDown: (_) {
+        if (!_rootFocus.hasFocus) _rootFocus.requestFocus();
+      },
+      child: Focus(
+        focusNode: _rootFocus,
+        child: Scaffold(
+          appBar: AppBar(
+            title: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Flexible(
+                  child: Text(
+                    'فهرس الفهارس',
+                    style: const TextStyle(fontFamily: 'Typokar'),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
                 ),
+                if (_index != null) ...[
+                  const SizedBox(width: 8),
+                  Flexible(
+                    child: Text(
+                      '- ${p.basename(_index!.folder)}',
+                      style: Theme.of(context).textTheme.titleLarge,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ],
               ],
+            ),
+            actions: [
+              ValueListenableBuilder<ThemeMode>(
+                valueListenable: appThemeMode,
+                builder: (context, mode, _) {
+                  final isNight = mode == ThemeMode.dark;
+                  return IconButton(
+                    tooltip: isNight ? 'الوضع النهاري' : 'الوضع الليلي',
+                    icon: Icon(isNight ? Icons.light_mode : Icons.dark_mode),
+                    onPressed: () => appThemeMode.value = isNight
+                        ? ThemeMode.light
+                        : ThemeMode.dark,
+                  );
+                },
+              ),
+              IconButton(
+                tooltip: 'اختيار مجلد',
+                icon: const Icon(Icons.folder_open),
+                onPressed: _loading ? null : _chooseFolder,
+              ),
+              IconButton(
+                tooltip: 'التبديل بين المجلدات المحفوظة',
+                icon: const Icon(Icons.folder_copy_outlined),
+                onPressed: _loading ? null : _showSwitchFolderDialog,
+              ),
+              IconButton(
+                tooltip: 'خيارات',
+                icon: const Icon(Icons.settings_outlined),
+                onPressed: _showOptionsDialog,
+              ),
+              IconButton(
+                tooltip: 'مساعدة (F1)',
+                icon: const Icon(Icons.help_outline),
+                onPressed: _showHelpDialog,
+              ),
             ],
           ),
-          actions: [
-            ValueListenableBuilder<ThemeMode>(
-              valueListenable: appThemeMode,
-              builder: (context, mode, _) {
-                final isNight = mode == ThemeMode.dark;
-                return IconButton(
-                  tooltip: isNight ? 'الوضع النهاري' : 'الوضع الليلي',
-                  icon: Icon(isNight ? Icons.light_mode : Icons.dark_mode),
-                  onPressed: () => appThemeMode.value =
-                      isNight ? ThemeMode.light : ThemeMode.dark,
-                );
-              },
-            ),
-            IconButton(
-              tooltip: 'اختيار مجلد',
-              icon: const Icon(Icons.folder_open),
-              onPressed: _loading ? null : _chooseFolder,
-            ),
-            IconButton(
-              tooltip: 'التبديل بين المجلدات المحفوظة',
-              icon: const Icon(Icons.folder_copy_outlined),
-              onPressed: _loading ? null : _showSwitchFolderDialog,
-            ),
-            IconButton(
-              tooltip: 'خيارات',
-              icon: const Icon(Icons.settings_outlined),
-              onPressed: _showOptionsDialog,
-            ),
-            IconButton(
-              tooltip: 'مساعدة (F1)',
-              icon: const Icon(Icons.help_outline),
-              onPressed: _showHelpDialog,
-            ),
-          ],
-        ),
-        body: Column(
-          children: [
-            _searchBar(cs),
-            _statusBar(cs),
-            const Divider(height: 1),
-            Expanded(child: _body(cs)),
-          ],
-        ),
+          body: Column(
+            children: [
+              _searchBar(cs),
+              _statusBar(cs),
+              const Divider(height: 1),
+              Expanded(child: _body(cs)),
+            ],
           ),
         ),
       ),
@@ -814,7 +951,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       return _emptyState(
         icon: Icons.folder_open,
         title: 'اختر مجلد الكتب',
-        subtitle: 'مجلد يحتوي على ملفات PDF مزوّدة بفهارس (Bookmarks)، أو ملفات HTML.',
+        subtitle:
+            'مجلد يحتوي على ملفات PDF مزوّدة بفهارس (Bookmarks)، أو ملفات HTML.',
         actionLabel: 'اختيار مجلد',
         onAction: _chooseFolder,
       );
@@ -880,7 +1018,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
         decoration: BoxDecoration(
           color: selected ? cs.primaryContainer.withValues(alpha: 0.45) : null,
-          border: Border(bottom: BorderSide(color: Theme.of(context).dividerColor)),
+          border: Border(
+            bottom: BorderSide(color: Theme.of(context).dividerColor),
+          ),
         ),
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.center,
@@ -896,7 +1036,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                     t.display,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+                    style: const TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w600,
+                    ),
                   ),
                   const SizedBox(height: 6),
                   // A single, horizontally-scrollable line of chips keeps the
@@ -909,9 +1052,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                       scrollDirection: Axis.horizontal,
                       child: Row(
                         children: [
-                          for (var j = 0;
-                              j < t.byBook.length && j < _maxChipsPerRow;
-                              j++) ...[
+                          for (
+                            var j = 0;
+                            j < t.byBook.length && j < _maxChipsPerRow;
+                            j++
+                          ) ...[
                             if (j > 0) const SizedBox(width: 8),
                             _bookChip(i, t, j, selected, cs),
                           ],
@@ -987,8 +1132,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Widget _chipLabel(BookHit hit, {bool constrained = false}) {
     final (name, trailing) = _chipLabelParts(hit);
     Widget nameText = Text(name, maxLines: 1, overflow: TextOverflow.ellipsis);
-    Widget trailingText =
-        Text(trailing, maxLines: 1, overflow: TextOverflow.ellipsis);
+    Widget trailingText = Text(
+      trailing,
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+    );
     if (constrained) {
       nameText = Flexible(child: nameText);
       trailingText = Flexible(child: trailingText);
@@ -1000,7 +1148,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     );
   }
 
-  Widget _bookChip(int rowIndex, Topic t, int j, bool selected, ColorScheme cs) {
+  Widget _bookChip(
+    int rowIndex,
+    Topic t,
+    int j,
+    bool selected,
+    ColorScheme cs,
+  ) {
     final hit = t.byBook[j];
     return ActionChip(
       visualDensity: VisualDensity.compact,
@@ -1008,8 +1162,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       avatar: (selected && j < 9)
           ? CircleAvatar(
               backgroundColor: cs.primary,
-              child: Text('${j + 1}',
-                  style: TextStyle(fontSize: 11, color: cs.onPrimary)),
+              child: Text(
+                '${j + 1}',
+                style: TextStyle(fontSize: 11, color: cs.onPrimary),
+              ),
             )
           : null,
       label: _chipLabel(hit),
@@ -1044,7 +1200,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               Text(
                 '$total',
                 style: TextStyle(
-                    color: cs.onSecondaryContainer, fontWeight: FontWeight.w600),
+                  color: cs.onSecondaryContainer,
+                  fontWeight: FontWeight.w600,
+                ),
               ),
             ],
           ),
@@ -1056,49 +1214,60 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   /// Full list of the topic's books; tapping one opens it. Used when a row has
   /// more chips than fit inline (see [_maxChipsPerRow]).
   Future<void> _showAllBooks(int rowIndex, Topic t) async {
-    await showDialog<void>(
-      context: context,
-      builder: (ctx) {
-        final cs = Theme.of(ctx).colorScheme;
-        return AlertDialog(
-          title: Text(t.display, maxLines: 2, overflow: TextOverflow.ellipsis),
-          content: SizedBox(
-            width: 460,
-            height: 480,
-            child: Scrollbar(
-              child: ListView.builder(
-                itemCount: t.byBook.length,
-                itemBuilder: (c, j) {
-                  final hit = t.byBook[j];
-                  return ListTile(
-                    dense: true,
-                    leading: j < 9
-                        ? CircleAvatar(
-                            radius: 12,
-                            backgroundColor: cs.primary,
-                            child: Text('${j + 1}',
+    await _trackDialog(
+      () => showDialog<void>(
+        context: context,
+        builder: (ctx) {
+          final cs = Theme.of(ctx).colorScheme;
+          return AlertDialog(
+            title: Text(
+              t.display,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+            ),
+            content: SizedBox(
+              width: 460,
+              height: 480,
+              child: Scrollbar(
+                child: ListView.builder(
+                  itemCount: t.byBook.length,
+                  itemBuilder: (c, j) {
+                    final hit = t.byBook[j];
+                    return ListTile(
+                      dense: true,
+                      leading: j < 9
+                          ? CircleAvatar(
+                              radius: 12,
+                              backgroundColor: cs.primary,
+                              child: Text(
+                                '${j + 1}',
                                 style: TextStyle(
-                                    fontSize: 11, color: cs.onPrimary)),
-                          )
-                        : null,
-                    title: _chipLabel(hit, constrained: true),
-                    onTap: () {
-                      Navigator.pop(ctx);
-                      setState(() => _selected = rowIndex);
-                      _openHit(hit);
-                    },
-                  );
-                },
+                                  fontSize: 11,
+                                  color: cs.onPrimary,
+                                ),
+                              ),
+                            )
+                          : null,
+                      title: _chipLabel(hit, constrained: true),
+                      onTap: () {
+                        Navigator.pop(ctx);
+                        setState(() => _selected = rowIndex);
+                        _openHit(hit);
+                      },
+                    );
+                  },
+                ),
               ),
             ),
-          ),
-          actions: [
-            TextButton(
+            actions: [
+              TextButton(
                 onPressed: () => Navigator.pop(ctx),
-                child: const Text('إغلاق')),
-          ],
-        );
-      },
+                child: const Text('إغلاق'),
+              ),
+            ],
+          );
+        },
+      ),
     );
     _reclaimFocus();
   }
@@ -1106,93 +1275,167 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   /// Opens the PDF viewer settings dialog, then refreshes the status bar so
   /// the "displayed via" text reflects any change.
   Future<void> _showViewerSettings() async {
-    await showViewerSettingsDialog(context);
+    await _trackDialog(() => showViewerSettingsDialog(context));
     _reclaimFocus();
     if (!mounted) return;
     setState(() {});
   }
 
+  /// Shows the app version and contact links.
+  Future<void> _showAboutDialog() async {
+    await _trackDialog(() => showAboutAppDialog(context));
+    _reclaimFocus();
+  }
+
   /// Shows every keyboard shortcut/gesture and a short explanation of how the
   /// program works. Opened from the AppBar help button and F1.
   Future<void> _showHelpDialog() async {
-    await showDialog<void>(
-      context: context,
-      builder: (ctx) {
-        final cs = Theme.of(ctx).colorScheme;
-        final textTheme = Theme.of(ctx).textTheme;
-        return AlertDialog(
-          title: const Text('مساعدة واختصارات لوحة المفاتيح'),
-          content: SizedBox(
-            width: 520,
-            height: 560,
-            child: Scrollbar(
-              child: SingleChildScrollView(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    _helpSectionTitle('كيف يعمل البرنامج', textTheme),
-                    Text(
-                      'يفحص المجلد الذي تختاره (ويشمل مجلداته الفرعية) بحثًا عن ملفات '
-                      'PDF تحتوي على فهارس (Bookmarks)، ويجمع العناوين المتشابهة عبر '
-                      'كتب مختلفة في صف واحد يعرض رقم الصفحة في كل كتاب. عند فتح '
-                      'موضوع، يُفتح الكتاب عند تلك الصفحة عبر SumatraPDF إن كان '
-                      'متوفرًا، وإلا في المتصفح الافتراضي. يُحفظ فهرس كل مجلد مؤقتًا '
-                      'لتسريع فتحه لاحقًا — استخدم زر "إعادة الفحص" بعد إضافة كتب '
-                      'جديدة إلى المجلد.',
-                      style: TextStyle(color: cs.onSurfaceVariant, height: 1.5),
-                    ),
-                    const SizedBox(height: 18),
-                    _helpSectionTitle('وضع المعجم', textTheme),
-                    Text(
-                      'إذا احتوى اسم المجلد على كلمة مثل "معجم" أو "معاجم" أو '
-                      '"dictionary"، يُفعَّل تلقائيًا وضع خاص يجمع عناوين الفهارس '
-                      'حسب جذرها اللغوي بدل تطابق النص الحرفي: تُوحَّد صور الهمزة '
-                      '(أ/إ/آ/ؤ/ئ) إلى ء، والحروف الضعيفة (ا/ي/ى) إلى و، ويُستنتج '
-                      'الجذر الثلاثي من الصيغة الثنائية (عض ← عضض) والرباعية '
-                      'المكررة (عضعض ← عضض). بهذا تجتمع صيغ الجذر الواحد '
-                      'المتفرقة بين معاجم مختلفة في صفٍّ واحد.',
-                      style: TextStyle(color: cs.onSurfaceVariant, height: 1.5),
-                    ),
-                    const SizedBox(height: 18),
-                    _helpSectionTitle('اختصارات عامة (تعمل من أي مكان)', textTheme),
-                    _shortcutRow('Ctrl + F', 'تركيز مربع البحث (يحدد النص الحالي)', cs),
-                    _shortcutRow('Ctrl + 1 … 9', 'فتح الموضوع المحدد في الكتاب رقم N', cs),
-                    _shortcutRow('Ctrl + E', 'عرض كل كتب الموضوع المحدد', cs),
-                    _shortcutRow('Ctrl + R', 'التبديل السريع للمجلد التالي المحفوظ (اضغطها مرة أخرى للتنقل، Enter للفتح)', cs),
-                    _shortcutRow('F1', 'فتح نافذة المساعدة هذه', cs),
-                    const SizedBox(height: 14),
-                    _helpSectionTitle('أثناء الكتابة في مربع البحث', textTheme),
-                    _shortcutRow('↑ / ↓', 'تحريك التحديد بين النتائج', cs),
-                    _shortcutRow('Enter', 'نقل التركيز إلى أول نتيجة', cs),
-                    _shortcutRow('Esc', 'نقل التركيز إلى القائمة (لا يمسح نص البحث)', cs),
-                    const SizedBox(height: 14),
-                    _helpSectionTitle('عند تركيز القائمة (خارج مربع البحث)', textTheme),
-                    _shortcutRow('↑ / ↓', 'تحريك التحديد', cs),
-                    _shortcutRow('/', 'تركيز مربع البحث', cs),
-                    _shortcutRow('Esc', 'يبقي التركيز على القائمة', cs),
-                    const SizedBox(height: 18),
-                    _helpSectionTitle('الفأرة', textTheme),
-                    _shortcutRow('نقر', 'تحديد الصف، أو فتح الكتاب مباشرة عند النقر عليه', cs),
-                    const SizedBox(height: 18),
-                    _helpSectionTitle('أزرار الشريط العلوي', textTheme),
-                    _shortcutRow('اختيار مجلد', 'فتح مجلد كتب جديد وبدء فحصه', cs),
-                    _shortcutRow('التبديل بين المجلدات', 'التنقل السريع بين المجلدات المفتوحة سابقًا', cs),
-                    _shortcutRow('إعادة الفحص', 'إعادة فحص المجلد الحالي (بعد إضافة كتب جديدة مثلًا)', cs),
-                    _shortcutRow('ترتيب المجلدات', 'فتح نافذة لتخصيص ترتيب ظهور المجلدات', cs),
-                    _shortcutRow('التحديث التلقائي', 'تبديل تحديث القائمة تلقائيًا بعد إعادة التسمية أو الحذف', cs),
-                    _shortcutRow('التعديل', 'تبديل السماح بإعادة التسمية والحذف عبر النقر اليمين', cs),
-                    _shortcutRow('عارض PDF', 'اختيار البرنامج المستخدم لفتح ملفات PDF', cs),
-                    _shortcutRow('مساعدة', 'فتح نافذة المساعدة هذه', cs),
-                  ],
+    await _trackDialog(
+      () => showDialog<void>(
+        context: context,
+        builder: (ctx) {
+          final cs = Theme.of(ctx).colorScheme;
+          final textTheme = Theme.of(ctx).textTheme;
+          return AlertDialog(
+            title: const Text('مساعدة واختصارات لوحة المفاتيح'),
+            content: SizedBox(
+              width: 520,
+              height: 560,
+              child: Scrollbar(
+                child: SingleChildScrollView(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      _helpSectionTitle('كيف يعمل البرنامج', textTheme),
+                      Text(
+                        'يفحص المجلد الذي تختاره (ويشمل مجلداته الفرعية) بحثًا عن ملفات '
+                        'PDF تحتوي على فهارس (Bookmarks)، ويجمع العناوين المتشابهة عبر '
+                        'كتب مختلفة في صف واحد يعرض رقم الصفحة في كل كتاب. عند فتح '
+                        'موضوع، يُفتح الكتاب عند تلك الصفحة عبر SumatraPDF إن كان '
+                        'متوفرًا، وإلا في المتصفح الافتراضي. يُحفظ فهرس كل مجلد مؤقتًا '
+                        'لتسريع فتحه لاحقًا — استخدم زر "إعادة الفحص" بعد إضافة كتب '
+                        'جديدة إلى المجلد.',
+                        style: TextStyle(
+                          color: cs.onSurfaceVariant,
+                          height: 1.5,
+                        ),
+                      ),
+                      const SizedBox(height: 18),
+                      _helpSectionTitle('وضع المعجم', textTheme),
+                      Text(
+                        'إذا احتوى اسم المجلد على كلمة مثل "معجم" أو "معاجم" أو '
+                        '"dictionary"، يُفعَّل تلقائيًا وضع خاص يجمع عناوين الفهارس '
+                        'حسب جذرها اللغوي بدل تطابق النص الحرفي: تُوحَّد صور الهمزة '
+                        '(أ/إ/آ/ؤ/ئ) إلى ء، والحروف الضعيفة (ا/ي/ى) إلى و، ويُستنتج '
+                        'الجذر الثلاثي من الصيغة الثنائية (عض ← عضض) والرباعية '
+                        'المكررة (عضعض ← عضض). بهذا تجتمع صيغ الجذر الواحد '
+                        'المتفرقة بين معاجم مختلفة في صفٍّ واحد.',
+                        style: TextStyle(
+                          color: cs.onSurfaceVariant,
+                          height: 1.5,
+                        ),
+                      ),
+                      const SizedBox(height: 18),
+                      _helpSectionTitle(
+                        'اختصارات عامة (تعمل من أي مكان)',
+                        textTheme,
+                      ),
+                      _shortcutRow(
+                        'Ctrl + F',
+                        'تركيز مربع البحث (يحدد النص الحالي)',
+                        cs,
+                      ),
+                      _shortcutRow(
+                        'Ctrl + 1 … 9',
+                        'فتح الموضوع المحدد في الكتاب رقم N',
+                        cs,
+                      ),
+                      _shortcutRow('Ctrl + E', 'عرض كل كتب الموضوع المحدد', cs),
+                      _shortcutRow(
+                        'Ctrl + R',
+                        'التبديل السريع للمجلد التالي المحفوظ (اضغطها مرة أخرى للتنقل، Enter للفتح)',
+                        cs,
+                      ),
+                      _shortcutRow('F1', 'فتح نافذة المساعدة هذه', cs),
+                      const SizedBox(height: 14),
+                      _helpSectionTitle(
+                        'أثناء الكتابة في مربع البحث',
+                        textTheme,
+                      ),
+                      _shortcutRow('↑ / ↓', 'تحريك التحديد بين النتائج', cs),
+                      _shortcutRow('Enter', 'نقل التركيز إلى أول نتيجة', cs),
+                      _shortcutRow(
+                        'Esc',
+                        'نقل التركيز إلى القائمة (لا يمسح نص البحث)',
+                        cs,
+                      ),
+                      const SizedBox(height: 14),
+                      _helpSectionTitle(
+                        'عند تركيز القائمة (خارج مربع البحث)',
+                        textTheme,
+                      ),
+                      _shortcutRow('↑ / ↓', 'تحريك التحديد', cs),
+                      _shortcutRow('/', 'تركيز مربع البحث', cs),
+                      _shortcutRow('Esc', 'يبقي التركيز على القائمة', cs),
+                      const SizedBox(height: 18),
+                      _helpSectionTitle('الفأرة', textTheme),
+                      _shortcutRow(
+                        'نقر',
+                        'تحديد الصف، أو فتح الكتاب مباشرة عند النقر عليه',
+                        cs,
+                      ),
+                      const SizedBox(height: 18),
+                      _helpSectionTitle('أزرار الشريط العلوي', textTheme),
+                      _shortcutRow(
+                        'اختيار مجلد',
+                        'فتح مجلد كتب جديد وبدء فحصه',
+                        cs,
+                      ),
+                      _shortcutRow(
+                        'التبديل بين المجلدات',
+                        'التنقل السريع بين المجلدات المفتوحة سابقًا',
+                        cs,
+                      ),
+                      _shortcutRow(
+                        'إعادة الفحص',
+                        'إعادة فحص المجلد الحالي (بعد إضافة كتب جديدة مثلًا)',
+                        cs,
+                      ),
+                      _shortcutRow(
+                        'ترتيب الملفات',
+                        'فتح نافذة لتخصيص ترتيب ظهور المجلدات والملفات غير المصنّفة',
+                        cs,
+                      ),
+                      _shortcutRow(
+                        'التحديث التلقائي',
+                        'تبديل تحديث القائمة تلقائيًا بعد إعادة التسمية أو الحذف',
+                        cs,
+                      ),
+                      _shortcutRow(
+                        'التعديل',
+                        'تبديل السماح بإعادة التسمية والحذف عبر النقر اليمين',
+                        cs,
+                      ),
+                      _shortcutRow(
+                        'عارض PDF',
+                        'اختيار البرنامج المستخدم لفتح ملفات PDF',
+                        cs,
+                      ),
+                      _shortcutRow('مساعدة', 'فتح نافذة المساعدة هذه', cs),
+                    ],
+                  ),
                 ),
               ),
             ),
-          ),
-          actions: [
-            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('إغلاق')),
-          ],
-        );
-      },
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('إغلاق'),
+              ),
+            ],
+          );
+        },
+      ),
     );
     _reclaimFocus();
   }
@@ -1200,7 +1443,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Widget _helpSectionTitle(String text, TextTheme textTheme) {
     return Padding(
       padding: const EdgeInsets.only(bottom: 8, top: 2),
-      child: Text(text, style: textTheme.titleSmall?.copyWith(fontWeight: FontWeight.bold)),
+      child: Text(
+        text,
+        style: textTheme.titleSmall?.copyWith(fontWeight: FontWeight.bold),
+      ),
     );
   }
 
@@ -1251,7 +1497,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 /// intercept Ctrl+R directly rather than relying on the app's global
 /// shortcut map, which the dialog's route sits outside of.
 class _FolderSwitcherDialog extends StatefulWidget {
-  const _FolderSwitcherDialog({required this.folders, required this.startIndex});
+  const _FolderSwitcherDialog({
+    required this.folders,
+    required this.startIndex,
+  });
 
   final List<String> folders;
   final int startIndex;
@@ -1273,7 +1522,8 @@ class _FolderSwitcherDialogState extends State<_FolderSwitcherDialog> {
   KeyEventResult _onKey(FocusNode node, KeyEvent e) {
     if (e is! KeyDownEvent && e is! KeyRepeatEvent) return KeyEventResult.ignored;
     final k = e.logicalKey;
-    if (k == LogicalKeyboardKey.keyR && HardwareKeyboard.instance.isControlPressed) {
+    if (k == LogicalKeyboardKey.keyR &&
+        HardwareKeyboard.instance.isControlPressed) {
       setState(() => _index = (_index + 1) % widget.folders.length);
       return KeyEventResult.handled;
     }
@@ -1310,7 +1560,10 @@ class _FolderSwitcherDialogState extends State<_FolderSwitcherDialog> {
               // below it.
               Container(
                 width: double.infinity,
-                padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 20),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 18,
+                  vertical: 20,
+                ),
                 decoration: BoxDecoration(
                   color: cs.primaryContainer,
                   borderRadius: BorderRadius.circular(14),

@@ -3,6 +3,19 @@ import 'package:path/path.dart' as p;
 import 'dictionary_mode.dart';
 import 'normalize.dart';
 
+/// Groups [bookPath] under the top-level entry it sits under, relative to
+/// [rootFolder]: the name of the first-level subfolder (however deeply the
+/// book is actually nested inside it), or the book's own file name when it
+/// sits directly inside [rootFolder] with no subfolder at all. This keeps
+/// the folder-order list to only the direct children of the scanned root —
+/// e.g. a root containing `test1/`, `test2/`, `test3/`, `test4/` (each with
+/// PDFs nested arbitrarily deep) yields exactly those four entries.
+String folderGroupOf(String bookPath, String rootFolder) {
+  final dir = p.dirname(bookPath);
+  if (p.equals(dir, rootFolder)) return p.basenameWithoutExtension(bookPath);
+  return p.split(p.relative(dir, from: rootFolder)).first;
+}
+
 /// A single PDF file in the scanned folder.
 class Book {
   final String id; // stable id = file path
@@ -76,10 +89,15 @@ class Topic {
   // Store.folderRank. Folders not present here sort after ranked ones.
   final Map<String, int> folderRank;
 
+  // The scanned root folder, needed to tell a book directly inside it apart
+  // from one in a real subfolder (see [folderGroupOf]).
+  final String rootFolder;
+
   Topic({
     required this.key,
     required this.display,
     required this.occurrences,
+    required this.rootFolder,
     this.folderRank = const {},
   });
 
@@ -125,7 +143,7 @@ class Topic {
     final folderOf = <String, String>{};
     final titleOf = <String, String>{};
     String folderKey(String id) =>
-        folderOf[id] ??= p.basename(p.dirname(id)).toLowerCase();
+        folderOf[id] ??= folderGroupOf(id, rootFolder).toLowerCase();
     String titleKey(String id) =>
         titleOf[id] ??= p.basenameWithoutExtension(id).toLowerCase();
 
@@ -233,7 +251,7 @@ class LibraryIndex {
     final display = <String, String>{};
     for (final o in occurrences) {
       if (disabledFolders.isNotEmpty) {
-        final folderName = p.basename(p.dirname(o.bookId)).toLowerCase();
+        final folderName = folderGroupOf(o.bookId, folder).toLowerCase();
         if (disabledFolders.contains(folderName)) continue;
       }
       // In dictionary-mode folders, group by root-letter form so spelling
@@ -254,6 +272,7 @@ class LibraryIndex {
         key: key,
         display: display[key]!,
         occurrences: occ,
+        rootFolder: folder,
         folderRank: folderRank,
       ));
     });
@@ -332,14 +351,14 @@ class LibraryIndex {
     );
   }
 
-  /// Distinct immediate parent-folder names across [books], case-insensitively
-  /// deduped and alphabetically sorted. Source list for the folder-order
-  /// dialog (see lib/main.dart).
+  /// Distinct top-level entries directly under [folder] across [books] —
+  /// see [folderGroupOf] — case-insensitively deduped and alphabetically
+  /// sorted. Source list for the folder-order dialog (see lib/main.dart).
   List<String> get folderNames {
     final seen = <String>{};
     final names = <String>[];
     for (final b in books) {
-      final name = p.basename(p.dirname(b.path));
+      final name = folderGroupOf(b.path, folder);
       if (seen.add(name.toLowerCase())) names.add(name);
     }
     names.sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
